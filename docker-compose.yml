@@ -1,0 +1,20 @@
+services:
+  app:
+    image: ghcr.io/ronaimate-agent/soda:latest
+    container_name: soda
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    volumes:
+      - soda-uploads:/app/uploads
+      - soda-data:/root/.local/share
+    networks:
+      - proxy-net
+
+volumes:
+  soda-uploads:
+  soda-data:
+
+networks:
+  proxy-net:
+    external: true

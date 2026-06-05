@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>📝 Ideas</h1>
+    <button class="btn btn-primary" onclick="showCreateIdea()">+ New Idea</button>
+</div>
+
+<div class="idea-grid">
+    {% for idea in ideas %}
+    <div class="idea-card" data-idea-id="{{ idea.id }}">
+        <h3>{{ idea.title }}</h3>
+        {% if idea.description %}<p>{{ idea.description[:200] }}{% if idea.description|length > 200 %}...{% endif %}</p>{% endif %}
+        <div class="idea-meta">
+            {% if idea.architect_user_id %}
+                {% set arch = ai_users|selectattr('id', 'equalto', idea.architect_user_id)|first %}
+                {% if arch %}<span class="badge">Architect: {{ arch.name }}</span>{% endif %}
+            {% endif %}
+            <span class="badge status-{{ idea.status }}">{{ idea.status }}</span>
+        </div>
+        <div class="idea-actions">
+            {% if idea.status == 'active' and idea.architect_user_id %}
+            <button class="btn btn-sm btn-primary" onclick="generateProject({{ idea.id }})">🚀 Generate Project</button>
+            {% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No ideas yet. What are you building next?</p>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Create Idea Modal -->
+<div id="create-idea-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('create-idea-modal')">&times;</span>
+        <h2>New Idea</h2>
+        <form onsubmit="return createIdea(event)">
+            <label>Title</label>
+            <input type="text" name="title" required>
+            <label>Description</label>
+            <textarea name="description" rows="4"></textarea>
+            <label>System Prompt (for Architect)</label>
+            <textarea name="system_prompt" rows="3" placeholder="Optional: instructions for the Architect AI"></textarea>
+            <label>Architect AI</label>
+            <select name="architect_user_id">
+                <option value="">Select...</option>
+                {% for u in ai_users %}
+                <option value="{{ u.id }}">{{ u.name }} ({{ u.provider or '?' }})</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-primary">Create</button>
+        </form>
+    </div>
+</div>
+
+<script>
+async function createIdea(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const res = await fetch('/api/ideas', { method: 'POST', body: fd });
+    if (res.ok) { closeModal('create-idea-modal'); window.location.reload(); }
+    return false;
+}
+
+async function generateProject(ideaId) {
+    const btn = document.querySelector(`[data-idea-id="${ideaId}"] .btn`);
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating...';
+
+    const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST' });
+    const data = await res.json();
+
+    if (data.status === 'generated') {
+        alert(`Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
+        window.location = `/project/${data.project_id}`;
+    } else if (data.status === 'questions') {
+        alert('The Architect has questions. Check the idea for details.');
+        window.location.reload();
+    } else {
+        alert('Generation failed. Check the architect configuration.');
+        btn.disabled = false;
+        btn.textContent = '🚀 Generate Project';
+    }
+}
+
+function closeModal(id) {
+    document.getElementById(id).style.display = 'none';
+}
+document.querySelectorAll('.modal').forEach(m => {
+    m.addEventListener('click', e => { if (e.target === m) m.style.display = 'none'; });
+});
+</script>
+{% endblock %}

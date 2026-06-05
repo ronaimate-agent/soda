@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>⚙ Settings</h1>
+</div>
+
+<div class="settings-form">
+    <form onsubmit="return saveSettings(event)">
+        <h3>Callback</h3>
+        <label>Callback URL</label>
+        <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
+        <p class="help-text">This URL is called by the execute command to report task status. Available in templates as <code>{% raw %}{{callback.url}}{% endraw %}</code>.</p>
+
+        <h3>Task Lifecycle</h3>
+        <div class="lifecycle-diagram">
+            <div class="lifecycle-step">📋 Backlog</div>
+            <div class="lifecycle-arrow">→</div>
+            <div class="lifecycle-step">▶️ Running</div>
+            <div class="lifecycle-arrow">→</div>
+            <div class="lifecycle-step lifecycle-pause">🚫 Blocked</div>
+            <div class="lifecycle-arrow">↩</div>
+            <div class="lifecycle-step">▶️ Running</div>
+            <div class="lifecycle-arrow">→</div>
+            <div class="lifecycle-step">👁️ Review</div>
+            <div class="lifecycle-arrow">→</div>
+            <div class="lifecycle-step">✅ Done</div>
+        </div>
+        <p class="help-text">Drag tasks between columns to trigger lifecycle transitions.</p>
+
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </form>
+</div>
+
+<script>
+async function saveSettings(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
+    if (res.ok) { alert('Settings saved!'); window.location.reload(); }
+    return false;
+}
+</script>
+{% endblock %}

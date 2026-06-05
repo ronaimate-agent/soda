@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Soda{% if project %} – {{ project.name }}{% endif %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="navbar">
+        <div class="nav-left">
+            <a href="/" class="nav-brand">🥤 Soda</a>
+            <nav class="nav-links">
+                <a href="/ideas" class="nav-link{% if request.url.path == '/ideas' %} active{% endif %}">Ideas</a>
+                {% if projects %}
+                <div class="project-switcher">
+                    <select onchange="if(this.value) window.location=this.value" class="project-select">
+                        <option value="">-- Projects --</option>
+                        {% for p in projects %}
+                        <option value="/project/{{ p.id }}" {% if project and project.id == p.id %}selected{% endif %}>{{ p.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                {% endif %}
+                <a href="/users" class="nav-link{% if request.url.path == '/users' %} active{% endif %}">Users</a>
+                <a href="/settings" class="nav-link{% if request.url.path == '/settings' %} active{% endif %}">Settings</a>
+            </nav>
+        </div>
+    </header>
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+    <script src="/static/app.js"></script>
+</body>
+</html>

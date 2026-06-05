@@ -1,0 +1,826 @@
+import asyncio
+import json
+import os
+import subprocess
+import tempfile
+from datetime import date
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+from .database import (
+    GlobalSetting, Idea, Project, Task, TaskComment, TaskDependency, User,
+    async_session, init_db, sa_select,
+)
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
+OPENCODE_AUTH = os.path.expanduser("~/.local/share/opencode/auth.json")
+
+# In-memory process tracker: task_id -> subprocess.Popen
+running_processes: dict[int, asyncio.subprocess.Process] = {}
+
+# ─── Pydantic models ────────────────────────────────────────────────
+
+class CallbackPayload(BaseModel):
+    taskId: int
+    status: str  # "blocked" | "review"
+    question: Optional[str] = None
+    summary: Optional[str] = None
+
+class TaskMovePayload(BaseModel):
+    column: str
+
+class CommentPayload(BaseModel):
+    content: str
+    author: str = "user"
+
+# ─── App factory ────────────────────────────────────────────────────
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Soda")
+
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+    # ── Lifespan ────────────────────────────────────────────────────
+
+    @app.on_event("startup")
+    async def startup():
+        await init_db()
+
+    # ── Template helpers ────────────────────────────────────────────
+
+    def status_label(col: str) -> str:
+        labels = {
+            "backlog": "Backlog",
+            "running": "Running",
+            "blocked": "Blocked",
+            "review": "Review",
+            "done": "Done",
+        }
+        return labels.get(col, col)
+
+    # ── Frontend pages ──────────────────────────────────────────────
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index_page(request: Request):
+        async with async_session() as session:
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+        return templates.TemplateResponse(
+            "index.html", {"request": request, "projects": projects, "current_project": None}
+        )
+
+    @app.get("/ideas", response_class=HTMLResponse)
+    async def ideas_page(request: Request):
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(Idea).where(Idea.status.in_(["active", "generating"])).order_by(Idea.created_at.desc())
+            )
+            ideas = result.scalars().all()
+            result = await session.execute(
+                sa_select(User).where(User.type == "ai").order_by(User.name)
+            )
+            ai_users = result.scalars().all()
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+        return templates.TemplateResponse(
+            "ideas.html",
+            {"request": request, "ideas": ideas, "ai_users": ai_users, "projects": projects},
+        )
+
+    @app.get("/project/{project_id}", response_class=HTMLResponse)
+    async def board_page(request: Request, project_id: int):
+        async with async_session() as session:
+            project = await session.get(Project, project_id)
+            if not project:
+                raise HTTPException(404, "Project not found")
+            result = await session.execute(
+                sa_select(Task)
+                .where(Task.project_id == project_id)
+                .order_by(Task.position, Task.created_at)
+            )
+            tasks = result.scalars().all()
+            result = await session.execute(sa_select(User).order_by(User.name))
+            users = result.scalars().all()
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+
+            # Fetch comments per task
+            comments_map = {}
+            for t in tasks:
+                cr = await session.execute(
+                    sa_select(TaskComment).where(TaskComment.task_id == t.id).order_by(TaskComment.created_at)
+                )
+                comments_map[t.id] = cr.scalars().all()
+
+        return templates.TemplateResponse(
+            "board.html",
+            {
+                "request": request,
+                "project": project,
+                "tasks": tasks,
+                "users": users,
+                "projects": projects,
+                "comments_map": {str(k): v for k, v in comments_map.items()},
+                "status_label": status_label,
+            },
+        )
+
+    @app.get("/users", response_class=HTMLResponse)
+    async def users_page(request: Request):
+        async with async_session() as session:
+            result = await session.execute(sa_select(User).order_by(User.name))
+            users = result.scalars().all()
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+        return templates.TemplateResponse(
+            "users.html", {"request": request, "users": users, "projects": projects}
+        )
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request):
+        async with async_session() as session:
+            result = await session.execute(sa_select(GlobalSetting))
+            settings = {row.key: row.value for row in result.scalars().all()}
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+        return templates.TemplateResponse(
+            "settings.html",
+            {"request": request, "settings": settings, "projects": projects},
+        )
+
+    # ── API: Projects ──────────────────────────────────────────────
+
+    @app.get("/api/projects")
+    async def list_projects():
+        async with async_session() as session:
+            result = await session.execute(sa_select(Project).order_by(Project.name))
+            projects = result.scalars().all()
+            return [
+                {"id": p.id, "name": p.name, "description": p.description, "created_at": str(p.created_at)}
+                for p in projects
+            ]
+
+    @app.post("/api/projects")
+    async def create_project(name: str = Form(...), description: str = Form("")):
+        async with async_session() as session:
+            project = Project(name=name, description=description)
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            return {"id": project.id, "name": project.name}
+
+    @app.get("/api/projects/{project_id}")
+    async def get_project(project_id: int):
+        async with async_session() as session:
+            project = await session.get(Project, project_id)
+            if not project:
+                raise HTTPException(404)
+            return {
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "review_user_id": project.review_user_id,
+            }
+
+    @app.patch("/api/projects/{project_id}")
+    async def update_project(project_id: int, name: Optional[str] = Form(None), description: Optional[str] = Form(None), review_user_id: Optional[int] = Form(None)):
+        async with async_session() as session:
+            project = await session.get(Project, project_id)
+            if not project:
+                raise HTTPException(404)
+            if name:
+                project.name = name
+            if description is not None:
+                project.description = description
+            if review_user_id is not None:
+                project.review_user_id = review_user_id if review_user_id > 0 else None
+            await session.commit()
+            return {"ok": True}
+
+    # ── API: Tasks ─────────────────────────────────────────────────
+
+    @app.get("/api/projects/{project_id}/tasks")
+    async def list_tasks(project_id: int):
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(Task).where(Task.project_id == project_id).order_by(Task.position, Task.created_at)
+            )
+            tasks = result.scalars().all()
+            return [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "description": t.description,
+                    "column": t.column,
+                    "assignee_id": t.assignee_id,
+                    "complexity": t.complexity,
+                    "position": t.position,
+                }
+                for t in tasks
+            ]
+
+    @app.post("/api/projects/{project_id}/tasks")
+    async def create_task(
+        project_id: int,
+        title: str = Form(...),
+        description: str = Form(""),
+        assignee_id: Optional[int] = Form(None),
+        complexity: Optional[str] = Form(None),
+    ):
+        async with async_session() as session:
+            project = await session.get(Project, project_id)
+            if not project:
+                raise HTTPException(404, "Project not found")
+            # Get max position
+            result = await session.execute(
+                sa_select(Task).where(Task.project_id == project_id).order_by(Task.position.desc()).limit(1)
+            )
+            last = result.scalar_one_or_none()
+            pos = (last.position + 1) if last else 0
+            task = Task(
+                project_id=project_id,
+                title=title,
+                description=description,
+                assignee_id=assignee_id,
+                complexity=complexity,
+                position=pos,
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            return {"id": task.id, "title": task.title, "column": task.column}
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task(task_id: int):
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404)
+            result = await session.execute(
+                sa_select(TaskComment).where(TaskComment.task_id == task_id).order_by(TaskComment.created_at)
+            )
+            comments = [
+                {"id": c.id, "author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                for c in result.scalars().all()
+            ]
+            return {
+                "id": task.id,
+                "project_id": task.project_id,
+                "title": task.title,
+                "description": task.description,
+                "column": task.column,
+                "assignee_id": task.assignee_id,
+                "complexity": task.complexity,
+                "position": task.position,
+                "comments": comments,
+            }
+
+    @app.patch("/api/tasks/{task_id}")
+    async def update_task(
+        task_id: int,
+        title: Optional[str] = Form(None),
+        description: Optional[str] = Form(None),
+        assignee_id: Optional[int] = Form(None),
+        complexity: Optional[str] = Form(None),
+    ):
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404)
+            if title:
+                task.title = title
+            if description is not None:
+                task.description = description
+            if assignee_id is not None:
+                task.assignee_id = assignee_id if assignee_id > 0 else None
+            if complexity is not None:
+                task.complexity = complexity if complexity else None
+            await session.commit()
+            return {"ok": True}
+
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: int):
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404)
+            await session.delete(task)
+            await session.commit()
+            return {"ok": True}
+
+    # ── API: Move task ─────────────────────────────────────────────
+
+    async def _run_execute_command(task: Task, assignee: User) -> None:
+        """Run the AI user's execute command as a subprocess."""
+        if not assignee.execute_command:
+            return
+
+        # Write AI user's auth to OpenCode config
+        _write_opencode_auth(assignee)
+
+        # Build comments JSON
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
+            )
+            comments = [
+                {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                for c in result.scalars().all()
+            ]
+
+        # Get callback URL from settings
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
+            )
+            setting = result.scalar_one_or_none()
+            callback_url = setting.value if setting else "http://localhost:8000/api/callback"
+
+        # Resolve template variables
+        cmd = assignee.execute_command
+        cmd = cmd.replace("{{task.id}}", str(task.id))
+        cmd = cmd.replace("{{task.title}}", task.title or "")
+        cmd = cmd.replace("{{task.description}}", task.description or "")
+        cmd = cmd.replace("{{task.complexity}}", task.complexity or "")
+        cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
+        cmd = cmd.replace("{{project.name}}", str((await session.get(Project, task.project_id)).name))
+        cmd = cmd.replace("{{callback.url}}", callback_url)
+
+        # Run the command
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=os.path.expanduser("~"),
+        )
+        running_processes[task.id] = proc
+
+    def _write_opencode_auth(user: User) -> None:
+        """Write AI user's API key and model to OpenCode auth.json."""
+        auth_dir = os.path.dirname(OPENCODE_AUTH)
+        os.makedirs(auth_dir, exist_ok=True)
+        auth_data = {}
+        if user.api_key:
+            auth_data["apiKey"] = user.api_key
+        if user.provider:
+            auth_data["provider"] = user.provider
+        if user.model:
+            auth_data["model"] = user.model
+        with open(OPENCODE_AUTH, "w") as f:
+            json.dump(auth_data, f)
+
+    @app.post("/api/tasks/{task_id}/move")
+    async def move_task(task_id: int, payload: TaskMovePayload):
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404, "Task not found")
+
+            old_column = task.column
+            new_column = payload.column
+
+            if new_column not in ("backlog", "running", "blocked", "review", "done"):
+                raise HTTPException(400, f"Invalid column: {new_column}")
+
+            task.column = new_column
+
+            # If moving to Running and assignee is an AI user, execute command
+            if new_column == "running":
+                if task.assignee_id:
+                    assignee = await session.get(User, task.assignee_id)
+                    if assignee and assignee.type == "ai":
+                        await _run_execute_command(task, assignee)
+
+            # If moving from blocked to running, kill old process if any
+            if old_column == "blocked" and new_column == "running":
+                if task.id in running_processes:
+                    proc = running_processes[task.id]
+                    if proc.returncode is None:
+                        proc.kill()
+                    del running_processes[task.id]
+
+            # If moving to backlog, kill process
+            if new_column == "backlog" and task.id in running_processes:
+                proc = running_processes[task.id]
+                if proc.returncode is None:
+                    proc.kill()
+                del running_processes[task.id]
+
+            await session.commit()
+            return {"ok": True, "column": new_column}
+
+    # ── API: Comments ──────────────────────────────────────────────
+
+    @app.get("/api/tasks/{task_id}/comments")
+    async def list_comments(task_id: int):
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(TaskComment).where(TaskComment.task_id == task_id).order_by(TaskComment.created_at)
+            )
+            return [
+                {"id": c.id, "author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                for c in result.scalars().all()
+            ]
+
+    @app.post("/api/tasks/{task_id}/comments")
+    async def add_comment(task_id: int, payload: CommentPayload):
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404)
+            comment = TaskComment(
+                task_id=task_id, author=payload.author, content=payload.content
+            )
+            session.add(comment)
+            await session.commit()
+            await session.refresh(comment)
+            return {"id": comment.id, "author": comment.author, "content": comment.content}
+
+    # ── API: Ideas ─────────────────────────────────────────────────
+
+    @app.get("/api/ideas")
+    async def list_ideas():
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(Idea).order_by(Idea.created_at.desc())
+            )
+            ideas = result.scalars().all()
+            return [
+                {
+                    "id": i.id,
+                    "title": i.title,
+                    "description": i.description,
+                    "system_prompt": i.system_prompt,
+                    "architect_user_id": i.architect_user_id,
+                    "status": i.status,
+                    "created_by": i.created_by,
+                    "created_at": str(i.created_at),
+                }
+                for i in ideas
+            ]
+
+    @app.post("/api/ideas")
+    async def create_idea(
+        title: str = Form(...),
+        description: str = Form(""),
+        system_prompt: str = Form(""),
+        architect_user_id: Optional[int] = Form(None),
+    ):
+        async with async_session() as session:
+            idea = Idea(
+                title=title,
+                description=description,
+                system_prompt=system_prompt,
+                architect_user_id=architect_user_id,
+                status="active",
+            )
+            session.add(idea)
+            await session.commit()
+            await session.refresh(idea)
+            return {"id": idea.id, "title": idea.title, "status": idea.status}
+
+    @app.post("/api/ideas/{idea_id}/generate")
+    async def generate_from_idea(idea_id: int):
+        """Start generating a project from an idea using the architect AI."""
+        async with async_session() as session:
+            idea = await session.get(Idea, idea_id)
+            if not idea:
+                raise HTTPException(404, "Idea not found")
+            if not idea.architect_user_id:
+                raise HTTPException(400, "No architect user selected")
+            architect = await session.get(User, idea.architect_user_id)
+            if not architect or architect.type != "ai":
+                raise HTTPException(400, "Architect must be an AI user")
+
+            idea.status = "generating"
+            await session.commit()
+
+        # Build prompt for the architect
+        sys_prompt = architect.system_prompt or ""
+        if idea.system_prompt:
+            sys_prompt += "\n\n" + idea.system_prompt
+
+        task_prompt = f"""You are an Architect AI. Your job is to generate a project from this idea:
+
+Title: {idea.title}
+Description: {idea.description}
+
+{sys_prompt}
+
+First, ask any clarifying questions you have. Return your response as JSON with one of these formats:
+
+If you have questions:
+{{
+  "type": "questions",
+  "questions": ["Question 1?", "Question 2?"]
+}}
+
+If you're ready to generate:
+{{
+  "type": "generate",
+  "project_name": "...",
+  "project_description": "...",
+  "tasks": [
+    {{"title": "...", "description": "...", "complexity": "M"}}
+  ]
+}}"""
+
+        # Write architect auth
+        _write_opencode_auth(architect)
+
+        # Run OpenCode
+        proc = await asyncio.create_subprocess_shell(
+            f'opencode run --prompt {json.dumps(task_prompt)}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+
+        # Parse response
+        output = stdout.decode().strip()
+        # Try to find JSON in the output
+        import re as re_m
+        json_match = re_m.search(r'\{[\s\S]*\}', output)
+        if not json_match:
+            async with async_session() as session:
+                idea = await session.get(Idea, idea_id)
+                idea.status = "active"
+                await session.commit()
+            raise HTTPException(500, "Architect did not return valid JSON")
+
+        try:
+            result = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            async with async_session() as session:
+                idea = await session.get(Idea, idea_id)
+                idea.status = "active"
+                await session.commit()
+            raise HTTPException(500, "Failed to parse architect response")
+
+        if result.get("type") == "questions":
+            # Save questions as comments on a temporary placeholder
+            async with async_session() as session:
+                idea = await session.get(Idea, idea_id)
+                idea.status = "active"
+                await session.commit()
+            return {
+                "status": "questions",
+                "questions": result.get("questions", []),
+                "idea_id": idea_id,
+            }
+
+        if result.get("type") == "generate":
+            async with async_session() as session:
+                # Create project
+                project = Project(
+                    name=result.get("project_name", idea.title),
+                    description=result.get("project_description", idea.description),
+                )
+                session.add(project)
+                await session.commit()
+                await session.refresh(project)
+
+                # Create tasks
+                for i, t in enumerate(result.get("tasks", [])):
+                    task = Task(
+                        project_id=project.id,
+                        title=t.get("title", "Untitled"),
+                        description=t.get("description", ""),
+                        complexity=t.get("complexity"),
+                        column="backlog",
+                        position=i,
+                    )
+                    session.add(task)
+
+                idea.status = "generated"
+                await session.commit()
+
+            return {
+                "status": "generated",
+                "project_id": project.id,
+                "project_name": project.name,
+                "tasks_count": len(result.get("tasks", [])),
+            }
+
+        async with async_session() as session:
+            idea = await session.get(Idea, idea_id)
+            idea.status = "active"
+            await session.commit()
+        raise HTTPException(500, "Unexpected architect response")
+
+    # ── API: Users ─────────────────────────────────────────────────
+
+    @app.get("/api/users")
+    async def list_users():
+        async with async_session() as session:
+            result = await session.execute(sa_select(User).order_by(User.name))
+            users = result.scalars().all()
+            return [
+                {
+                    "id": u.id,
+                    "name": u.name,
+                    "role": u.role,
+                    "type": u.type,
+                    "provider": u.provider,
+                    "model": u.model,
+                    "system_prompt": u.system_prompt,
+                    "execute_command": u.execute_command,
+                }
+                for u in users
+            ]
+
+    @app.post("/api/users")
+    async def create_user(
+        name: str = Form(...),
+        role: str = Form(""),
+        type: str = Form(...),
+        provider: str = Form(""),
+        api_key: str = Form(""),
+        model: str = Form(""),
+        system_prompt: str = Form(""),
+        execute_command: str = Form(""),
+    ):
+        async with async_session() as session:
+            user = User(
+                name=name,
+                role=role or None,
+                type=type,
+                provider=provider or None,
+                api_key=api_key or None,
+                model=model or None,
+                system_prompt=system_prompt or None,
+                execute_command=execute_command or None,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            # If AI user with API key, update OpenCode auth
+            if type == "ai" and api_key:
+                _write_opencode_auth(user)
+
+            return {"id": user.id, "name": user.name, "type": user.type}
+
+    @app.patch("/api/users/{user_id}")
+    async def update_user(
+        user_id: int,
+        name: Optional[str] = Form(None),
+        role: Optional[str] = Form(None),
+        type: Optional[str] = Form(None),
+        provider: Optional[str] = Form(None),
+        api_key: Optional[str] = Form(None),
+        model: Optional[str] = Form(None),
+        system_prompt: Optional[str] = Form(None),
+        execute_command: Optional[str] = Form(None),
+    ):
+        async with async_session() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise HTTPException(404)
+            if name:
+                user.name = name
+            if role is not None:
+                user.role = role or None
+            if api_key is not None:
+                user.api_key = api_key or None
+            if provider is not None:
+                user.provider = provider or None
+            if model is not None:
+                user.model = model or None
+            if system_prompt is not None:
+                user.system_prompt = system_prompt or None
+            if execute_command is not None:
+                user.execute_command = execute_command or None
+            await session.commit()
+
+            # Update OpenCode auth if this AI user has API key
+            if user.type == "ai" and user.api_key:
+                _write_opencode_auth(user)
+
+            return {"ok": True}
+
+    @app.delete("/api/users/{user_id}")
+    async def delete_user(user_id: int):
+        async with async_session() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise HTTPException(404)
+            await session.delete(user)
+            await session.commit()
+            return {"ok": True}
+
+    # ── API: Settings ──────────────────────────────────────────────
+
+    @app.get("/api/settings")
+    async def get_settings():
+        async with async_session() as session:
+            result = await session.execute(sa_select(GlobalSetting))
+            return {row.key: row.value for row in result.scalars().all()}
+
+    @app.patch("/api/settings")
+    async def update_settings(callback_url: str = Form(...)):
+        async with async_session() as session:
+            setting = await session.get(GlobalSetting, "callback_url")
+            if setting:
+                setting.value = callback_url
+            else:
+                session.add(GlobalSetting(key="callback_url", value=callback_url))
+            await session.commit()
+            return {"ok": True}
+
+    # ── API: Callback ──────────────────────────────────────────────
+
+    @app.post("/api/callback")
+    async def callback(payload: CallbackPayload):
+        """Callback endpoint for the execute command to report status."""
+        async with async_session() as session:
+            task = await session.get(Task, payload.taskId)
+            if not task:
+                raise HTTPException(404, "Task not found")
+
+            if payload.status == "blocked" and payload.question:
+                task.column = "blocked"
+                comment = TaskComment(
+                    task_id=task.id,
+                    author="AI",
+                    content=payload.question,
+                )
+                session.add(comment)
+
+            elif payload.status == "review":
+                task.column = "review"
+                if payload.summary:
+                    comment = TaskComment(
+                        task_id=task.id,
+                        author="AI",
+                        content=f"**Summary:** {payload.summary}",
+                    )
+                    session.add(comment)
+
+                # Auto-review if review user configured
+                project = await session.get(Project, task.project_id)
+                if project and project.review_user_id:
+                    reviewer = await session.get(User, project.review_user_id)
+                    if reviewer and reviewer.type == "ai":
+                        _write_opencode_auth(reviewer)
+                        # Run review via OpenCode
+                        review_prompt = f"""Review this task:
+Title: {task.title}
+Description: {task.description}
+
+Provide a concise review. Focus on: code quality, completeness, and any issues.
+Return your review as JSON:
+{{"approved": true/false, "comments": "..."}}"""
+
+                        proc = await asyncio.create_subprocess_shell(
+                            f'opencode run --prompt {json.dumps(review_prompt)}',
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+                        output = stdout.decode().strip()
+                        import re as re_m2
+                        jm = re_m2.search(r'\{[\s\S]*\}', output)
+                        if jm:
+                            try:
+                                review_result = json.loads(jm.group())
+                                review_comment = TaskComment(
+                                    task_id=task.id,
+                                    author=reviewer.name,
+                                    content=review_result.get("comments", "Review completed."),
+                                )
+                                session.add(review_comment)
+                            except json.JSONDecodeError:
+                                pass
+
+            # Clean up process tracker
+            if payload.taskId in running_processes:
+                del running_processes[payload.taskId]
+
+            await session.commit()
+            return {"ok": True, "column": task.column}
+
+    # ── API: Running processes ─────────────────────────────────────
+
+    @app.get("/api/tasks/{task_id}/process")
+    async def get_process_status(task_id: int):
+        proc = running_processes.get(task_id)
+        if not proc:
+            return {"running": False}
+        return {"running": proc.returncode is None, "exit_code": proc.returncode}
+
+    # ── Static files ───────────────────────────────────────────────
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    return app
+
+
+app = create_app()

@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>👤 Users</h1>
+    <button class="btn btn-primary" onclick="showCreateUser()">+ New User</button>
+</div>
+
+<div class="user-list">
+    {% for u in users %}
+    <div class="user-card" data-user-id="{{ u.id }}">
+        <div class="user-type-badge {{ u.type }}">{{ u.type }}</div>
+        <h3>{{ u.name }}</h3>
+        {% if u.role %}<p class="user-role">{{ u.role }}</p>{% endif %}
+        {% if u.type == 'ai' %}
+        <div class="user-details">
+            <div>Provider: <code>{{ u.provider or 'N/A' }}</code></div>
+            <div>Model: <code>{{ u.model or 'N/A' }}</code></div>
+            <div>API Key: <code>{{ '••••' if u.api_key else 'Not set' }}</code></div>
+        </div>
+        {% endif %}
+        <div class="user-actions">
+            <button class="btn btn-sm" onclick="showEditUser({{ u.id }})">Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Create/Edit User Modal -->
+<div id="user-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('user-modal')">&times;</span>
+        <h2 id="user-modal-title">New User</h2>
+        <form id="user-form" onsubmit="return saveUser(event)">
+            <input type="hidden" name="user_id" id="user-id" value="">
+            <label>Name</label>
+            <input type="text" name="name" id="user-name" required>
+            <label>Role</label>
+            <input type="text" name="role" id="user-role" placeholder="e.g. Senior Dev, Architect">
+            <label>Type</label>
+            <select name="type" id="user-type" onchange="toggleAI(this.value)">
+                <option value="human">Human</option>
+                <option value="ai">AI</option>
+            </select>
+            <div id="ai-fields" style="display:none">
+                <label>Provider</label>
+                <select name="provider" id="user-provider">
+                    <option value="">Select...</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                </select>
+                <label>Model</label>
+                <input type="text" name="model" id="user-model" placeholder="e.g. claude-sonnet-4-20250514">
+                <label>API Key</label>
+                <input type="password" name="api_key" id="user-api-key" placeholder="sk-...">
+                <label>System Prompt</label>
+                <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty..."></textarea>
+                <label>Execute Command</label>
+                <textarea name="execute_command" id="user-execute-command" rows="3" placeholder="e.g. opencode run --prompt '{{task.description}}'">opencode run --prompt 'Task: {{task.title}}
+
+Description: {{task.description}}
+
+Complexity: {{task.complexity}}
+
+Previous comments: {{task.comments}}
+
+When done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked.'</textarea>
+                <p class="help-text">Available variables: <code>{% raw %}{{task.id}}, {{task.title}}, {{task.description}}, {{task.complexity}}, {{task.comments}}, {{project.name}}, {{callback.url}}{% endraw %}</code></p>
+            </div>
+            <button type="submit" class="btn btn-primary">Save</button>
+        </form>
+    </div>
+</div>
+
+<script>
+function toggleAI(type) {
+    document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
+}
+
+function showCreateUser() {
+    document.getElementById('user-modal-title').textContent = 'New User';
+    document.getElementById('user-id').value = '';
+    document.getElementById('user-form').reset();
+    document.getElementById('user-modal').style.display = 'flex';
+    toggleAI('human');
+}
+
+async function showEditUser(userId) {
+    document.getElementById('user-modal-title').textContent = 'Edit User';
+    document.getElementById('user-id').value = userId;
+
+    const res = await fetch('/api/users');
+    const users = await res.json();
+    const u = users.find(x => x.id === userId);
+    if (!u) return;
+
+    document.getElementById('user-name').value = u.name || '';
+    document.getElementById('user-role').value = u.role || '';
+    document.getElementById('user-type').value = u.type || 'human';
+    toggleAI(u.type || 'human');
+
+    if (u.type === 'ai') {
+        document.getElementById('user-provider').value = u.provider || '';
+        document.getElementById('user-model').value = u.model || '';
+        document.getElementById('user-api-key').value = '';
+        document.getElementById('user-system-prompt').value = u.system_prompt || '';
+        document.getElementById('user-execute-command').value = u.execute_command || 'opencode run --prompt \'Task: {{task.title}}\n\nDescription: {{task.description}}\n\nComplexity: {{task.complexity}}\n\nPrevious comments: {{task.comments}}\n\nWhen done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked.\'';
+    }
+
+    document.getElementById('user-modal').style.display = 'flex';
+}
+
+async function saveUser(e) {
+    e.preventDefault();
+    const userId = document.getElementById('user-id').value;
+    const fd = new FormData(e.target);
+    fd.delete('user_id');
+
+    const url = userId ? `/api/users/${userId}` : '/api/users';
+    const method = userId ? 'PATCH' : 'POST';
+
+    const res = await fetch(url, { method, body: fd });
+    if (res.ok) { closeModal('user-modal'); window.location.reload(); }
+    return false;
+}
+
+async function deleteUser(userId) {
+    if (!confirm('Delete this user?')) return;
+    await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+    window.location.reload();
+}
+
+function closeModal(id) {
+    document.getElementById(id).style.display = 'none';
+}
+document.querySelectorAll('.modal').forEach(m => {
+    m.addEventListener('click', e => { if (e.target === m) m.style.display = 'none'; });
+});
+</script>
+{% endblock %}
