@@ -1,8 +1,9 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
-import tempfile
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -20,10 +21,11 @@ from .database import (
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
-OPENCODE_AUTH = os.path.expanduser("~/.local/share/opencode/auth.json")
+OPENCODE_AUTH = Path("/root/.local/share/opencode/auth.json")
 
-# In-memory process tracker: task_id -> subprocess.Popen
+# In-memory process tracker: task_id -> asyncio.subprocess.Process
 running_processes: dict[int, asyncio.subprocess.Process] = {}
+
 
 # ─── Pydantic models ────────────────────────────────────────────────
 
@@ -33,25 +35,30 @@ class CallbackPayload(BaseModel):
     question: Optional[str] = None
     summary: Optional[str] = None
 
+
 class TaskMovePayload(BaseModel):
     column: str
+
 
 class CommentPayload(BaseModel):
     content: str
     author: str = "user"
 
+
+# ─── Lifespan ───────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
 # ─── App factory ────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Soda")
+    app = FastAPI(title="Soda", lifespan=lifespan)
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
-    # ── Lifespan ────────────────────────────────────────────────────
-
-    @app.on_event("startup")
-    async def startup():
-        await init_db()
 
     # ── Template helpers ────────────────────────────────────────────
 
@@ -64,6 +71,74 @@ def create_app() -> FastAPI:
             "done": "Done",
         }
         return labels.get(col, col)
+
+    # ── Helper: write OpenCode auth ─────────────────────────────────
+
+    def _write_opencode_auth(user: User) -> None:
+        """Write AI user's API key and model to OpenCode auth.json."""
+        auth_dir = OPENCODE_AUTH.parent
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        auth_data = {}
+        if user.api_key:
+            auth_data["apiKey"] = user.api_key
+        if user.provider:
+            auth_data["provider"] = user.provider
+        if user.model:
+            auth_data["model"] = user.model
+        with open(OPENCODE_AUTH, "w") as f:
+            json.dump(auth_data, f)
+
+    # ── Helper: run execute command ─────────────────────────────────
+
+    async def _run_execute_command(task: Task, assignee: User) -> None:
+        """Run the AI user's execute command as a subprocess."""
+        if not assignee.execute_command:
+            return
+
+        # Write AI user's auth to OpenCode config
+        _write_opencode_auth(assignee)
+
+        # Build comments JSON
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
+            )
+            comments = [
+                {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                for c in result.scalars().all()
+            ]
+
+        # Get callback URL from settings
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
+            )
+            setting = result.scalar_one_or_none()
+            callback_url = setting.value if setting else "http://localhost:8000/api/callback"
+
+        # Get project name
+        async with async_session() as session:
+            project = await session.get(Project, task.project_id)
+            project_name = project.name if project else ""
+
+        # Resolve template variables
+        cmd = assignee.execute_command
+        cmd = cmd.replace("{{task.id}}", str(task.id))
+        cmd = cmd.replace("{{task.title}}", task.title or "")
+        cmd = cmd.replace("{{task.description}}", task.description or "")
+        cmd = cmd.replace("{{task.complexity}}", task.complexity or "")
+        cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
+        cmd = cmd.replace("{{project.name}}", project_name)
+        cmd = cmd.replace("{{callback.url}}", callback_url)
+
+        # Run the command
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=os.path.expanduser("~"),
+        )
+        running_processes[task.id] = proc
 
     # ── Frontend pages ──────────────────────────────────────────────
 
@@ -317,65 +392,6 @@ def create_app() -> FastAPI:
 
     # ── API: Move task ─────────────────────────────────────────────
 
-    async def _run_execute_command(task: Task, assignee: User) -> None:
-        """Run the AI user's execute command as a subprocess."""
-        if not assignee.execute_command:
-            return
-
-        # Write AI user's auth to OpenCode config
-        _write_opencode_auth(assignee)
-
-        # Build comments JSON
-        async with async_session() as session:
-            result = await session.execute(
-                sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
-            )
-            comments = [
-                {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
-                for c in result.scalars().all()
-            ]
-
-        # Get callback URL from settings
-        async with async_session() as session:
-            result = await session.execute(
-                sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
-            )
-            setting = result.scalar_one_or_none()
-            callback_url = setting.value if setting else "http://localhost:8000/api/callback"
-
-        # Resolve template variables
-        cmd = assignee.execute_command
-        cmd = cmd.replace("{{task.id}}", str(task.id))
-        cmd = cmd.replace("{{task.title}}", task.title or "")
-        cmd = cmd.replace("{{task.description}}", task.description or "")
-        cmd = cmd.replace("{{task.complexity}}", task.complexity or "")
-        cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
-        cmd = cmd.replace("{{project.name}}", str((await session.get(Project, task.project_id)).name))
-        cmd = cmd.replace("{{callback.url}}", callback_url)
-
-        # Run the command
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=os.path.expanduser("~"),
-        )
-        running_processes[task.id] = proc
-
-    def _write_opencode_auth(user: User) -> None:
-        """Write AI user's API key and model to OpenCode auth.json."""
-        auth_dir = os.path.dirname(OPENCODE_AUTH)
-        os.makedirs(auth_dir, exist_ok=True)
-        auth_data = {}
-        if user.api_key:
-            auth_data["apiKey"] = user.api_key
-        if user.provider:
-            auth_data["provider"] = user.provider
-        if user.model:
-            auth_data["model"] = user.model
-        with open(OPENCODE_AUTH, "w") as f:
-            json.dump(auth_data, f)
-
     @app.post("/api/tasks/{task_id}/move")
     async def move_task(task_id: int, payload: TaskMovePayload):
         async with async_session() as session:
@@ -546,8 +562,7 @@ If you're ready to generate:
         # Parse response
         output = stdout.decode().strip()
         # Try to find JSON in the output
-        import re as re_m
-        json_match = re_m.search(r'\{[\s\S]*\}', output)
+        json_match = re.search(r'\{[\s\S]*\}', output)
         if not json_match:
             async with async_session() as session:
                 idea = await session.get(Idea, idea_id)
@@ -786,8 +801,7 @@ Return your review as JSON:
                         )
                         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
                         output = stdout.decode().strip()
-                        import re as re_m2
-                        jm = re_m2.search(r'\{[\s\S]*\}', output)
+                        jm = re.search(r'\{[\s\S]*\}', output)
                         if jm:
                             try:
                                 review_result = json.loads(jm.group())
@@ -815,6 +829,13 @@ Return your review as JSON:
         if not proc:
             return {"running": False}
         return {"running": proc.returncode is None, "exit_code": proc.returncode}
+
+    # ── API: Health check ──────────────────────────────────────────
+
+    @app.get("/api/health")
+    async def health_check():
+        """Health check endpoint."""
+        return {"status": "ok", "service": "soda"}
 
     # ── Static files ───────────────────────────────────────────────
 

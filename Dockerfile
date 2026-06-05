@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY src/ /app/src/
 WORKDIR /app
 
-RUN mkdir -p ~/.local/share/opencode && echo '{}' > ~/.local/share/opencode/auth.json
+RUN mkdir -p /root/.local/share/opencode && echo '{}' > /root/.local/share/opencode/auth.json
 
 EXPOSE 8000
 
