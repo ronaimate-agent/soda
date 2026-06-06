@@ -156,8 +156,31 @@ class TaskGitState(Base):
 
 
 async def init_db():
+    # Create all tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Auto-migrate: add missing columns to existing tables
+    async with engine.begin() as conn:
+        # Check if ideas table exists and add pending_questions if missing
+        result = await conn.exec_driver_sql("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'ideas' AND column_name = 'pending_questions'
+        """)
+        if result.first() is None:
+            await conn.exec_driver_sql("ALTER TABLE ideas ADD COLUMN pending_questions TEXT")
+        
+        # Check if ideas table exists and add created_by if missing
+        result = await conn.exec_driver_sql("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'ideas' AND column_name = 'created_by'
+        """)
+        if result.first() is None:
+            await conn.exec_driver_sql("ALTER TABLE ideas ADD COLUMN created_by VARCHAR(255)")
+    
+    # Initialize default settings
     async with async_session() as session:
         for key, default in [
             ("callback_url", "http://localhost:8000/api/callback"),
