@@ -498,4 +498,53 @@ textarea { resize: vertical; min-height: 60px; }
 .settings-form h3:first-child { margin-top: 0; }
 
 /* ── Status badges extra ────────────────────────────── */
+
+/* ── Unassigned task ─────────────────────────────────── */
+.task-unassigned {
+    border-color: var(--orange) !important;
+    border-style: dashed !important;
+}
+.task-unassigned:hover {
+    border-color: var(--red) !important;
+}
+.assignee-badge.unassigned {
+    background: transparent;
+    color: var(--orange);
+    border: 1px dashed var(--orange);
+    font-size: 0.8em;
+}
+
+/* ── Task assignee section ───────────────────────────── */
+.task-assignee-section {
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    background: var(--bg);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+.task-assignee-section label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.85em;
+}
+.task-assignee-section select {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 0.9em;
+    cursor: pointer;
+}
+.task-assignee-section select:focus {
+    border-color: var(--accent);
+}
+
+/* ── Git commit ──────────────────────────────────────── */
+.git-status {
+    margin: 8px 0;
+    font-size: 0.85em;
+    min-height: 20px;
+}
 .status-archived { background: var(--bg3); color: var(--text2); }

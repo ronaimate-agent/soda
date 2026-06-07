@@ -27,7 +27,7 @@
         </div>
         <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
             {% for task in tasks if task.board_column == col %}
-            <div class="task-card" draggable="true" ondragstart="drag(event)" data-task-id="{{ task.id }}" onclick="showTaskDetail({{ task.id }})">
+            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %}" draggable="true" ondragstart="drag(event)" data-task-id="{{ task.id }}" onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
                     <span class="card-title">{{ task.title }}</span>
                 </div>
@@ -39,6 +39,8 @@
                 {% if assignee %}
                 <span class="assignee-badge" title="{{ assignee.name }}">{{ assignee.name[:2] }}</span>
                 {% endif %}
+                {% else %}
+                <span class="assignee-badge unassigned" title="No assignee">—</span>
                 {% endif %}
             </div>
             {% endfor %}
@@ -146,6 +148,14 @@ async function drop(e) {
     const column = e.currentTarget.dataset.column;
     if (!taskId || !column) return;
 
+    // Check if task has an assignee before allowing move
+    const taskRes = await fetch(`/api/tasks/${taskId}`);
+    const task = await taskRes.json();
+    if (!task.assignee_id) {
+        alert('⚠️ Please assign a user to this task before moving it.');
+        return;
+    }
+
     const res = await fetch(`/api/tasks/${taskId}/move`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -168,6 +178,15 @@ async function showTaskDetail(taskId) {
             <span class="badge complexity-${(task.complexity||'').toLowerCase()}">${task.complexity || 'N/A'}</span>
         </div>
         ${task.description ? `<div class="task-description"><p>${task.description}</p></div>` : ''}
+        <div class="task-assignee-section">
+            <label><strong>Assignee:</strong></label>
+            <select id="task-assignee-select" onchange="updateTaskAssignee(${taskId}, this.value)">
+                <option value="">— Unassigned —</option>
+                {% for u in users %}
+                <option value="{{ u.id }}" ${task.assignee_id == {{ u.id }} ? 'selected' : ''}>{{ u.name }} ({{ u.type }})</option>
+                {% endfor %}
+            </select>
+        </div>
         <div class="task-comments">
             <h4>Comments</h4>
             <div class="comments-list">`;
@@ -190,7 +209,9 @@ async function showTaskDetail(taskId) {
         <div class="task-actions">
             <button class="btn btn-sm" onclick="moveTask(${taskId}, 'backlog')">← Backlog</button>
             <button class="btn btn-sm" onclick="moveTask(${taskId}, 'running')">▶ Running</button>
-            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'done')">✓ Done</button>
+            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'blocked')">🚫 Blocked</button>
+            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'review')">👁 Review</button>
+            <button class="btn btn-sm btn-success" onclick="moveTask(${taskId}, 'done')">✓ Done</button>
             <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId})">🗑 Delete</button>
             ${task.column === 'done' ? `<button class="btn btn-sm btn-success" onclick="showGitCommitModal(${taskId})">📦 Commit & Push</button>` : ''}
         </div>
@@ -211,6 +232,18 @@ async function addComment(e, taskId) {
     });
     showTaskDetail(taskId);
     return false;
+}
+
+async function updateTaskAssignee(taskId, assigneeId) {
+    const fd = new FormData();
+    fd.append('assignee_id', assigneeId);
+    const res = await fetch(`/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        body: fd
+    });
+    if (!res.ok) {
+        alert('Failed to update assignee');
+    }
 }
 
 async function moveTask(taskId, column) {
