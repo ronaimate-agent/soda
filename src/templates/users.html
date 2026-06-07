@@ -83,6 +83,10 @@ Complexity: {% raw %}{{task.complexity}}{% endraw %}
 
 Previous comments: {% raw %}{{task.comments}}{% endraw %}
 
+Working directory: {% raw %}{{task.workdir}}{% endraw %}
+
+IMPORTANT: Do all your work in the working directory above. Create files, write code, and commit your changes there.
+
 When done, call {% raw %}{{callback.url}}{% endraw %} with taskId={% raw %}{{task.id}}{% endraw %} and status=review. If you have questions, call with status=blocked and include your question.'`;
 
 async function fetchModels() {

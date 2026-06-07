@@ -414,8 +414,9 @@ textarea { resize: vertical; min-height: 60px; }
     margin-bottom: 6px;
 }
 .comment strong { font-size: 0.85em; color: var(--accent); }
-.comment p { font-size: 0.9em; margin: 4px 0; }
+.comment p { font-size: 0.9em; margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
 .comment small { font-size: 0.75em; color: var(--text2); }
+.comment-ai { border-left: 3px solid var(--accent); padding-left: 10px; background: rgba(108,92,231,0.05); }
 .comment-form textarea {
     min-height: 40px;
     font-size: 0.85em;

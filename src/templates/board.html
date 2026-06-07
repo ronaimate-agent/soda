@@ -188,13 +188,18 @@ async function showTaskDetail(taskId) {
             </select>
         </div>
         <div class="task-comments">
-            <h4>Comments</h4>
+            <h4>Comments & AI Output</h4>
             <div class="comments-list">`;
 
-    for (const c of task.comments) {
-        html += `<div class="comment">
+    if (!task.comments || task.comments.length === 0) {
+        html += `<p class="help-text">No comments yet.</p>`;
+    }
+
+    for (const c of (task.comments || [])) {
+        const isAI = c.author === 'AI' || c.author.includes('AI');
+        html += `<div class="comment ${isAI ? 'comment-ai' : ''}">
             <strong>${c.author}</strong>
-            <p>${c.content}</p>
+            <p>${c.content.replace(/\n/g, '<br>')}</p>
             <small>${c.created_at}</small>
         </div>`;
     }

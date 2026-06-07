@@ -141,6 +141,12 @@ def create_app() -> FastAPI:
             project = await session.get(Project, task.project_id)
             project_name = project.name if project else ""
 
+        # Create task workdir
+        workdir_base = Path("/tmp/soda-task-workdirs")
+        workdir_base.mkdir(parents=True, exist_ok=True)
+        workdir = workdir_base / f"task-{task.id}"
+        workdir.mkdir(parents=True, exist_ok=True)
+
         # Resolve template variables
         cmd = assignee.execute_command
         cmd = cmd.replace("{{task.id}}", str(task.id))
@@ -150,18 +156,19 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
+        cmd = cmd.replace("{{task.workdir}}", str(workdir))
 
         # Build environment with OpenCode API key injected
         env = os.environ.copy()
         if opencode_api_key:
             env["OPENCODE_API_KEY"] = opencode_api_key
 
-        # Run the command
+        # Run the command in the task workdir
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=os.path.expanduser("~"),
+            cwd=str(workdir),
             env=env,
         )
         running_processes[task.id] = proc
@@ -1023,8 +1030,24 @@ Return ONLY valid JSON, no other text."""
     # ── API: Callback ──────────────────────────────────────────────
 
     @app.post("/api/callback")
-    async def callback(payload: CallbackPayload):
-        """Callback endpoint for the execute command to report status."""
+    async def callback(
+        request: Request,
+        taskId: int = Query(None),
+        status: str = Query(None),
+        question: Optional[str] = Query(None),
+        summary: Optional[str] = Query(None),
+    ):
+        """Callback endpoint for the execute command to report status.
+        Accepts both JSON body and query parameters (OpenCode uses query params)."""
+        # If query params are present, use them; otherwise parse JSON body
+        if taskId is not None and status is not None:
+            payload = CallbackPayload(taskId=taskId, status=status, question=question, summary=summary)
+        else:
+            try:
+                body = await request.json()
+                payload = CallbackPayload(**body)
+            except Exception:
+                raise HTTPException(422, "Invalid callback payload: provide taskId and status as query params or JSON body")
         async with async_session() as session:
             task = await session.get(Task, payload.taskId)
             if not task:
@@ -1041,11 +1064,28 @@ Return ONLY valid JSON, no other text."""
 
             elif payload.status == "review":
                 task.board_column = "review"
+                # Collect AI output from the running process
+                ai_output = ""
                 if payload.summary:
+                    ai_output = f"**Summary:** {payload.summary}"
+                # Try to get stdout from the running process
+                if payload.taskId in running_processes:
+                    proc = running_processes[payload.taskId]
+                    if proc.returncode is not None:
+                        try:
+                            stdout = (await proc.stdout.read()).decode().strip()
+                            stderr = (await proc.stderr.read()).decode().strip()
+                            if stdout:
+                                ai_output += f"\n\n**AI Output:**\n{stdout[:2000]}"
+                            if stderr:
+                                ai_output += f"\n\n**Stderr:**\n{stderr[:500]}"
+                        except Exception:
+                            pass
+                if ai_output:
                     comment = TaskComment(
                         task_id=task.id,
                         author="AI",
-                        content=f"**Summary:** {payload.summary}",
+                        content=ai_output,
                     )
                     session.add(comment)
 
