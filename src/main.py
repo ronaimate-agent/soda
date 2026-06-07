@@ -163,15 +163,19 @@ def create_app() -> FastAPI:
         if opencode_api_key:
             env["OPENCODE_API_KEY"] = opencode_api_key
 
-        # Run the command in the task workdir
+        # Run the command in the task workdir, capture output to file
+        stdout_file = workdir / ".soda-stdout.log"
+        stderr_file = workdir / ".soda-stderr.log"
+        stdout_fd = open(stdout_file, "w")
+        stderr_fd = open(stderr_file, "w")
         proc = await asyncio.create_subprocess_shell(
             cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=stdout_fd,
+            stderr=stderr_fd,
             cwd=str(workdir),
             env=env,
         )
-        running_processes[task.id] = proc
+        running_processes[task.id] = (proc, stdout_fd, stderr_fd)
 
     # ── Frontend pages ──────────────────────────────────────────────
 
@@ -1064,23 +1068,52 @@ Return ONLY valid JSON, no other text."""
 
             elif payload.status == "review":
                 task.board_column = "review"
-                # Collect AI output from the running process
+                # Collect AI output: summary + stdout log + workdir file listing
                 ai_output = ""
                 if payload.summary:
                     ai_output = f"**Summary:** {payload.summary}"
-                # Try to get stdout from the running process
+                # Read stdout/stderr log files from workdir
+                workdir = Path(f"/tmp/soda-task-workdirs/task-{payload.taskId}")
+                stdout_log = workdir / ".soda-stdout.log"
+                stderr_log = workdir / ".soda-stderr.log"
+                if stdout_log.exists():
+                    try:
+                        stdout_text = stdout_log.read_text().strip()
+                        if stdout_text:
+                            ai_output += f"\n\n**AI Output:**\n{stdout_text[:3000]}"
+                    except Exception:
+                        pass
+                if stderr_log.exists():
+                    try:
+                        stderr_text = stderr_log.read_text().strip()
+                        if stderr_text:
+                            ai_output += f"\n\n**Stderr:**\n{stderr_text[:500]}"
+                    except Exception:
+                        pass
+                # Close process fds and clean up
                 if payload.taskId in running_processes:
-                    proc = running_processes[payload.taskId]
-                    if proc.returncode is not None:
+                    proc_info = running_processes[payload.taskId]
+                    if isinstance(proc_info, tuple):
+                        proc, stdout_fd, stderr_fd = proc_info
                         try:
-                            stdout = (await proc.stdout.read()).decode().strip()
-                            stderr = (await proc.stderr.read()).decode().strip()
-                            if stdout:
-                                ai_output += f"\n\n**AI Output:**\n{stdout[:2000]}"
-                            if stderr:
-                                ai_output += f"\n\n**Stderr:**\n{stderr[:500]}"
+                            stdout_fd.close()
+                            stderr_fd.close()
                         except Exception:
                             pass
+                    # Wait for process to finish
+                    try:
+                        if isinstance(proc_info, tuple):
+                            await asyncio.wait_for(proc_info[0].wait(), timeout=10)
+                        else:
+                            await asyncio.wait_for(proc_info.wait(), timeout=10)
+                    except Exception:
+                        pass
+                # List files in task workdir (excluding .soda-* logs)
+                if workdir.exists():
+                    files = [f for f in workdir.iterdir() if not f.name.startswith(".soda-")]
+                    if files:
+                        file_list = "\n".join(f"  • {f.name}{'/' if f.is_dir() else ''}" for f in sorted(files)[:30])
+                        ai_output += f"\n\n**Files created:**\n{file_list}"
                 if ai_output:
                     comment = TaskComment(
                         task_id=task.id,
@@ -1126,6 +1159,17 @@ Return your review as JSON:
 
             # Clean up process tracker
             if payload.taskId in running_processes:
+                proc_info = running_processes[payload.taskId]
+                if isinstance(proc_info, tuple):
+                    proc = proc_info[0]
+                else:
+                    proc = proc_info
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
                 del running_processes[payload.taskId]
 
             await session.commit()
