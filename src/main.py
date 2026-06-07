@@ -968,7 +968,7 @@ Return ONLY valid JSON, no other text."""
         """List available AI models from OpenCode"""
         try:
             proc = await asyncio.create_subprocess_shell(
-                "opencode models --json",
+                "opencode models",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -981,9 +981,13 @@ Return ONLY valid JSON, no other text."""
             if not output:
                 return []
             
-            models_data = json.loads(output)
-            # OpenCode returns models with 'id' field
-            return [{"id": m.get("id", "")} for m in models_data if m.get("id")]
+            # OpenCode returns plain text, one model per line
+            models = []
+            for line in output.split("\n"):
+                line = line.strip()
+                if line:
+                    models.append({"id": line})
+            return models
             
         except Exception as e:
             print(f"Error fetching models: {e}")
