@@ -200,7 +200,16 @@ async function generateProject() {
         fd.append('architect_user_id', architectUserId);
         
         const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST', body: fd });
-        const data = await res.json();
+        
+        let data;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            data = await res.json();
+        } else {
+            const text = await res.text();
+            throw new Error(`Server error (${res.status}): ${text.substring(0, 200)}`);
+        }
+        
         overlay.style.display = 'none';
 
         if (data.status === 'generated') {
@@ -208,6 +217,8 @@ async function generateProject() {
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
             window.location.reload();
+        } else if (data.detail) {
+            alert('Error: ' + data.detail);
         } else {
             alert('Generation failed. Check the architect configuration.');
         }
@@ -235,7 +246,17 @@ async function submitAnswers(ideaId) {
 
     try {
         const res = await fetch(`/api/ideas/${ideaId}/answer`, { method: 'POST', body: fd });
-        const data = await res.json();
+        
+        // Try to parse JSON, handle non-JSON (HTML) error responses
+        let data;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            data = await res.json();
+        } else {
+            const text = await res.text();
+            throw new Error(`Server error (${res.status}): ${text.substring(0, 200)}`);
+        }
+        
         overlay.style.display = 'none';
 
         if (data.status === 'generated') {
@@ -243,6 +264,8 @@ async function submitAnswers(ideaId) {
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
             window.location.reload();
+        } else if (data.detail) {
+            alert('Error: ' + data.detail);
         } else {
             alert('Something went wrong. Try again.');
         }

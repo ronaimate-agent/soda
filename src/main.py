@@ -77,7 +77,8 @@ def create_app() -> FastAPI:
     # ── Helper: write OpenCode auth ─────────────────────────────────
 
     def _write_opencode_auth(user: User) -> None:
-        """Write AI user's API key and model to OpenCode auth.json."""
+        """Write AI user's API key and model to OpenCode auth.json.
+        Falls back to global OpenCode API key if user has no key set."""
         auth_dir = OPENCODE_AUTH.parent
         auth_dir.mkdir(parents=True, exist_ok=True)
         auth_data = {}
@@ -87,6 +88,10 @@ def create_app() -> FastAPI:
             auth_data["provider"] = user.provider
         if user.model:
             auth_data["model"] = user.model
+        # If user has no API key, don't overwrite auth.json — let the
+        # global OPENCODE_API_KEY env var (set by callers) handle auth.
+        if not user.api_key:
+            return
         with open(OPENCODE_AUTH, "w") as f:
             json.dump(auth_data, f)
 
@@ -598,7 +603,13 @@ def create_app() -> FastAPI:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.error(f"Architect timed out after 600s")
+            raise HTTPException(504, "Architect AI timed out. Try again with a shorter prompt.")
         output = stdout.decode().strip()
         error_output = stderr.decode().strip()
         
