@@ -434,6 +434,43 @@ def create_app() -> FastAPI:
             await session.commit()
             return {"ok": True}
 
+    @app.delete("/api/projects/{project_id}")
+    async def delete_project(project_id: int):
+        """Delete a project and all its tasks, comments, and git states."""
+        async with async_session() as session:
+            project = await session.get(Project, project_id)
+            if not project:
+                raise HTTPException(404, "Project not found")
+            
+            # Delete all task comments and git states for this project's tasks
+            result = await session.execute(
+                sa_select(Task).where(Task.project_id == project_id)
+            )
+            tasks = result.scalars().all()
+            for task in tasks:
+                # Delete comments
+                await session.execute(
+                    TaskComment.__table__.delete().where(TaskComment.task_id == task.id)
+                )
+                # Delete git state
+                await session.execute(
+                    TaskGitState.__table__.delete().where(TaskGitState.task_id == task.id)
+                )
+                # Delete dependencies
+                await session.execute(
+                    TaskDependency.__table__.delete().where(
+                        (TaskDependency.task_id == task.id) | (TaskDependency.depends_on_task_id == task.id)
+                    )
+                )
+                # Delete the task
+                await session.delete(task)
+            
+            # Delete the project
+            await session.delete(project)
+            await session.commit()
+            
+            return {"ok": True, "message": f"Project '{project.name}' and all its tasks deleted."}
+
     @app.delete("/api/tasks/{task_id}")
     async def delete_task(task_id: int):
         async with async_session() as session:
@@ -645,9 +682,15 @@ def create_app() -> FastAPI:
             logger.error(f"Failed to parse architect JSON: {str(e)}, Output: {output[:500]}")
             raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
 
-    async def _create_project_from_result(idea: "Idea", result: dict) -> dict:
+    async def _create_project_from_result(
+        idea: "Idea",
+        result: dict,
+        repo_name: str = None,
+        repo_private: bool = True,
+    ) -> dict:
         """Create project and tasks from architect generate response.
-        Also creates a GitHub repo for the project if git auth is configured."""
+        Also creates a GitHub repo for the project.
+        If repo creation fails, the entire project generation fails (no tasks created)."""
         # First, verify GitHub auth is configured
         async with async_session() as session:
             username = await _get_setting(session, "git_username")
@@ -660,16 +703,23 @@ def create_app() -> FastAPI:
                 "The token needs 'repo' scope to create repositories."
             )
 
-        # Create GitHub repo for the project
-        repo_name = result.get("project_name", idea.title).lower().replace(" ", "-").replace("[^a-z0-9-]", "")
-        # Sanitize repo name
-        repo_name = re.sub(r'[^a-z0-9-]', '', repo_name)[:100]
+        # Determine repo name: use provided name or sanitize from project name
+        if repo_name:
+            repo_name = re.sub(r'[^a-z0-9-]', '', repo_name.lower().replace(' ', '-'))[:100]
+        else:
+            repo_name = result.get("project_name", idea.title).lower().replace(" ", "-")
+            repo_name = re.sub(r'[^a-z0-9-]', '', repo_name)[:100]
 
-        ensure_result = await _ensure_github_repo(username, repo_name, token)
+        if not repo_name:
+            repo_name = f"soda-{idea.id}"
+
+        # Create GitHub repo for the project — if this fails, everything fails
+        ensure_result = await _ensure_github_repo(username, repo_name, token, private=repo_private)
         if ensure_result["status"] == "error":
             raise HTTPException(400,
                 f"⚠️ Failed to create GitHub repo '{repo_name}': {ensure_result['message']}. "
-                "Please check your git_token has 'repo' scope and the repo name is valid."
+                "Please check your git_token has 'repo' scope and the repo name is valid. "
+                "Project generation was cancelled."
             )
 
         repo_url = ensure_result["data"].get("html_url", f"https://github.com/{username}/{repo_name}")
@@ -710,8 +760,15 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/ideas/{idea_id}/generate")
-    async def generate_from_idea(idea_id: int, architect_user_id: int = Form(None)):
-        """Start generating a project from an idea using the architect AI."""
+    async def generate_from_idea(
+        idea_id: int,
+        architect_user_id: int = Form(None),
+        repo_name: str = Form(None),
+        repo_private: str = Form("true"),
+    ):
+        """Start generating a project from an idea using the architect AI.
+        repo_name: optional custom repo name (sanitized from project name if not provided)
+        repo_private: 'true' or 'false' (default: true)"""
         async with async_session() as session:
             idea = await session.get(Idea, idea_id)
             if not idea:
@@ -781,7 +838,11 @@ Return ONLY valid JSON, no other text."""
         if result.get("type") == "generate":
             async with async_session() as session:
                 idea = await session.get(Idea, idea_id)
-            return await _create_project_from_result(idea, result)
+            return await _create_project_from_result(
+                idea, result,
+                repo_name=repo_name,
+                repo_private=repo_private == "true",
+            )
 
         async with async_session() as session:
             idea_obj = await session.get(Idea, idea_id)
@@ -1377,7 +1438,7 @@ Return your review as JSON:
             logger.error(f"Error creating PR for task {task.id}: {e}")
             return None
 
-    async def _ensure_github_repo(owner: str, repo_name: str, token: str) -> dict:
+    async def _ensure_github_repo(owner: str, repo_name: str, token: str, private: bool = True) -> dict:
         """Ensure the GitHub repository exists, create if it doesn't."""
         headers = {
             "Authorization": f"token {token}",
@@ -1399,9 +1460,9 @@ Return your review as JSON:
             create_url = "https://api.github.com/user/repos"
             create_data = {
                 "name": repo_name,
-                "private": True,
+                "private": private,
                 "auto_init": True,  # Create with README
-                "description": f"Created by Soda for task management"
+                "description": f"Created by Soda"
             }
             create_resp = await client.post(create_url, headers=headers, json=create_data)
             

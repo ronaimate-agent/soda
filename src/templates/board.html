@@ -6,6 +6,7 @@
         <div class="header-actions">
             <button class="btn btn-sm" onclick="showEditProject()">⚙ Edit</button>
             <button class="btn btn-primary btn-sm" onclick="showCreateTask()">+ Task</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteProject({{ project.id }})">🗑 Delete</button>
         </div>
     </div>
     {% if project.description %}<p class="project-desc">{{ project.description }}</p>{% endif %}
@@ -266,6 +267,17 @@ async function deleteTask(taskId) {
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
     closeModal('task-modal');
     window.location.reload();
+}
+
+async function deleteProject(projectId) {
+    if (!confirm('⚠️ Delete this project and ALL its tasks? This cannot be undone.')) return;
+    const res = await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+    if (res.ok) {
+        window.location = '/';
+    } else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || 'Failed to delete project'));
+    }
 }
 
 // ── Create Task ──────────────────────────────────────

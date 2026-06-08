@@ -101,9 +101,10 @@
 <div id="architect-select-modal" class="modal" style="display:none">
     <div class="modal-content">
         <span class="modal-close" onclick="closeModal('architect-select-modal')">&times;</span>
-        <h2>Select Architect AI</h2>
-        <p class="help-text" style="margin-bottom:16px">Choose which AI user will generate the project from this idea.</p>
+        <h2>Generate Project</h2>
+        <p class="help-text" style="margin-bottom:16px">Configure the architect AI and GitHub repository for this project.</p>
         <input type="hidden" id="architect-select-idea-id">
+        
         <label>Architect AI</label>
         <select id="architect-select-user">
             <option value="">Select an AI user...</option>
@@ -114,7 +115,28 @@
         {% if not ai_users %}
         <p class="help-text" style="margin-top:8px">⚠️ No AI users yet. <a href="/users">Create an AI user</a> first.</p>
         {% endif %}
-        <button class="btn btn-primary" onclick="generateProject()" style="margin-top:16px">Generate Project</button>
+        
+        <hr style="margin:16px 0; border-color:var(--border);">
+        
+        <h3 style="margin-bottom:12px;">📦 GitHub Repository</h3>
+        
+        <label>Repository Name</label>
+        <input type="text" id="repo-name" placeholder="my-project-name" style="margin-bottom:8px;">
+        <p class="help-text">Leave empty to auto-generate from project name. Only lowercase letters, numbers, and hyphens.</p>
+        
+        <label>Visibility</label>
+        <div style="display:flex; gap:16px; margin:8px 0 16px;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="radio" name="repo-visibility" value="private" checked>
+                <span>🔒 Private</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="radio" name="repo-visibility" value="public">
+                <span>🌐 Public</span>
+            </label>
+        </div>
+        
+        <button class="btn btn-primary" onclick="generateProject()" style="margin-top:8px;">Generate Project</button>
     </div>
 </div>
 
@@ -183,6 +205,8 @@ function showArchitectSelect(ideaId) {
 async function generateProject() {
     const ideaId = document.getElementById('architect-select-idea-id').value;
     const architectUserId = document.getElementById('architect-select-user').value;
+    const repoName = document.getElementById('repo-name').value.trim();
+    const repoPrivate = document.querySelector('input[name="repo-visibility"]:checked').value === 'private';
     
     if (!architectUserId) {
         alert('Please select an Architect AI user.');
@@ -193,11 +217,13 @@ async function generateProject() {
     
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
-    document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
+    document.getElementById('generate-status-text').textContent = 'Creating GitHub repo and generating tasks...';
 
     try {
         const fd = new FormData();
         fd.append('architect_user_id', architectUserId);
+        fd.append('repo_name', repoName);
+        fd.append('repo_private', repoPrivate ? 'true' : 'false');
         
         const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST', body: fd });
         
