@@ -856,6 +856,8 @@ def create_app() -> FastAPI:
             await session.commit()
             await session.refresh(project)
 
+            # Create tasks and track their DB IDs in order
+            task_db_ids = []
             for i, t in enumerate(result.get("tasks", [])):
                 task = Task(
                     project_id=project.id,
@@ -866,6 +868,26 @@ def create_app() -> FastAPI:
                     position=i,
                 )
                 session.add(task)
+                await session.flush()  # Get the task ID
+                task_db_ids.append(task.id)
+
+            # Create dependencies based on depends_on indices from architect
+            for i, t in enumerate(result.get("tasks", [])):
+                depends_on_indices = t.get("depends_on", [])
+                if depends_on_indices:
+                    task_id = task_db_ids[i]
+                    for dep_idx in depends_on_indices:
+                        if isinstance(dep_idx, int) and 0 <= dep_idx < len(task_db_ids) and dep_idx != i:
+                            dep_task_id = task_db_ids[dep_idx]
+                            # Check if dependency already exists (avoid duplicates)
+                            existing = await session.execute(
+                                sa_select(TaskDependency).where(
+                                    TaskDependency.task_id == task_id,
+                                    TaskDependency.depends_on_id == dep_task_id
+                                )
+                            )
+                            if not existing.scalar_one_or_none():
+                                session.add(TaskDependency(task_id=task_id, depends_on_id=dep_task_id))
 
             idea_obj = await session.get(Idea, idea.id)
             idea_obj.status = "generated"
@@ -933,9 +955,16 @@ If you are ready to generate, return ONLY this JSON:
   "project_name": "...",
   "project_description": "...",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL"}}
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "depends_on": []}}
   ]
 }}
+
+IMPORTANT: Each task can have a "depends_on" field with indices of previous tasks it depends on.
+- tasks[0] should always have "depends_on": [] (no dependencies, can start immediately)
+- Subsequent tasks should depend on earlier tasks that must be completed first
+- Use task indices (0-based) for dependencies, e.g., "depends_on": [0, 1]
+- Create a logical dependency chain: setup → core → features → tests → deploy
+- A task can depend on multiple previous tasks if needed
 
 Return ONLY valid JSON, no other text."""
 
@@ -1025,7 +1054,7 @@ Now generate the project. Return ONLY this JSON:
   "project_name": "...",
   "project_description": "...",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL"}}
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "depends_on": []}}
   ]
 }}
 
@@ -1034,6 +1063,11 @@ If you still have questions, return:
   "type": "questions",
   "questions": ["Question?"]
 }}
+
+IMPORTANT: Each task can have a "depends_on" field with indices of previous tasks it depends on.
+- tasks[0] should always have "depends_on": [] (no dependencies)
+- Use task indices (0-based) for dependencies
+- Create a logical dependency chain
 
 Return ONLY valid JSON, no other text."""
 
