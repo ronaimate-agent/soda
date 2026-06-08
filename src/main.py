@@ -118,8 +118,8 @@ def create_app() -> FastAPI:
 
     async def _run_execute_command(task: Task, assignee: User) -> None:
         """Run the AI user's execute command as a subprocess.
-        Clones the project repo, checks out main, and provides context about
-        remaining tasks so the AI only works on this specific task."""
+        Clones the project repo, checks out main, provides context,
+        then after AI completes: git commit/push, create PR, send callback."""
         if not assignee.execute_command:
             return
 
@@ -129,7 +129,7 @@ def create_app() -> FastAPI:
         # Get OpenCode API key from settings
         opencode_api_key = await _get_opencode_api_key()
 
-        # Build comments JSON
+        # Build comments JSON and collect context
         async with async_session() as session:
             result = await session.execute(
                 sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
@@ -139,12 +139,10 @@ def create_app() -> FastAPI:
                 for c in result.scalars().all()
             ]
 
-        # Get callback URL, project info, and git auth from settings
-        async with async_session() as session:
-            result = await session.execute(
+            setting_res = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
             )
-            setting = result.scalar_one_or_none()
+            setting = setting_res.scalar_one_or_none()
             callback_url = setting.value if setting else "http://localhost:8000/api/callback"
 
             project = await session.get(Project, task.project_id)
@@ -152,11 +150,10 @@ def create_app() -> FastAPI:
             repo_name = project.repo_name if project else ""
             repo_url = project.repo_url if project else ""
 
-            # Get git credentials for authenticated clone
             git_username = await _get_setting(session, "git_username")
             git_token = await _get_setting(session, "git_token")
+            default_branch = await _get_setting(session, "git_default_branch", "main")
 
-            # Get remaining tasks in this project (excluding this one) for context
             remaining_result = await session.execute(
                 sa_select(Task).where(
                     Task.project_id == task.project_id,
@@ -169,10 +166,9 @@ def create_app() -> FastAPI:
                 for t in remaining_tasks
             )
 
-        # Build authenticated repo URL for git clone
+        # Build authenticated repo URL
         auth_repo_url = repo_url
         if repo_url and git_username and git_token:
-            # Convert https://github.com/user/repo.git to https://user:token@github.com/user/repo.git
             auth_repo_url = repo_url.replace("https://github.com/", f"https://{git_username}:{git_token}@github.com/")
             auth_repo_url = auth_repo_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
 
@@ -182,23 +178,19 @@ def create_app() -> FastAPI:
         workdir = workdir_base / f"task-{task.id}"
         workdir.mkdir(parents=True, exist_ok=True)
 
-        # Clone the project repo and checkout main
         if auth_repo_url:
             import shutil
             import subprocess as sp
             try:
-                # Remove old workdir contents if any
                 for item in workdir.iterdir():
                     if item.is_dir():
                         shutil.rmtree(item)
                     else:
                         item.unlink()
-                # Clone and checkout main
                 sp.run(["git", "clone", auth_repo_url, str(workdir)], check=True, capture_output=True, timeout=60)
                 sp.run(["git", "checkout", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
                 sp.run(["git", "pull", "origin", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
-            except Exception as e:
-                # If clone fails, continue with empty workdir — AI will create files from scratch
+            except Exception:
                 pass
 
         # Build the full prompt with context
@@ -211,22 +203,22 @@ def create_app() -> FastAPI:
 **Description:** {task.description or '(no description)'}
 **Complexity:** {task.complexity or 'not specified'}
 
-## Other tasks in this project (DO NOT work on these — they will be handled separately):
+## Other tasks in this project (DO NOT work on these):
 {remaining_summary if remaining_summary else '(none)'}
 
 ## Existing comments on this task:
 {json.dumps(comments, indent=2) if comments else '(none)'}
 
-## Instructions:
+## Work Instructions:
 - ONLY implement what is described in "Your Task" above
 - Do NOT work on any of the other tasks listed above
-- Work in the current directory: {workdir}
-- When finished, report your status via the callback URL
-- Callback URL: {callback_url}?taskId={task.id}&status=review
-- If you have a question, use: {callback_url}?taskId={task.id}&status=blocked&question=YOUR_QUESTION
+- Work ONLY in the current directory: {workdir}
+- Create/edit files directly in this directory
+- Do NOT call any callback URL — the system handles that automatically
+- If you cannot complete the task, describe what is blocking you as the last line of your output
 """
 
-        # Resolve template variables in the execute command
+        # Resolve template variables
         cmd = assignee.execute_command
         cmd = cmd.replace("{{task.id}}", str(task.id))
         cmd = cmd.replace("{{task.title}}", task.title or "")
@@ -236,29 +228,26 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
         cmd = cmd.replace("{{task.workdir}}", str(workdir))
-
-        # Replace {{task.prompt}} with the full context prompt if present
         cmd = cmd.replace("{{task.prompt}}", full_prompt)
 
-        # Build environment with OpenCode API key injected
+        # Save the full prompt as a comment
+        try:
+            async with async_session() as prompt_session:
+                prompt_session.add(TaskComment(
+                    task_id=task.id,
+                    author="Soda",
+                    content=f"📋 **Prompt sent to AI:**\n\n{full_prompt}",
+                ))
+                await prompt_session.commit()
+        except Exception:
+            pass
+
+        # Build env
         env = os.environ.copy()
         if opencode_api_key:
             env["OPENCODE_API_KEY"] = opencode_api_key
 
-        # Save the full prompt as a comment so it's visible in the task detail
-        try:
-            async with async_session() as prompt_session:
-                prompt_comment = TaskComment(
-                    task_id=task.id,
-                    author="Soda",
-                    content=f"📋 **Prompt sent to AI:**\n\n{full_prompt}",
-                )
-                prompt_session.add(prompt_comment)
-                await prompt_session.commit()
-        except Exception:
-            pass  # Non-critical: if comment save fails, continue anyway
-
-        # Run the command in the task workdir, capture output to file
+        # Run OpenCode
         stdout_file = workdir / ".soda-stdout.log"
         stderr_file = workdir / ".soda-stderr.log"
         stdout_fd = open(stdout_file, "w")
@@ -271,6 +260,184 @@ def create_app() -> FastAPI:
             env=env,
         )
         running_processes[task.id] = (proc, stdout_fd, stderr_fd)
+
+        # Store context for post-processing
+        _post_process_ctx[task.id] = {
+            "callback_url": callback_url,
+            "workdir": str(workdir),
+            "auth_repo_url": auth_repo_url,
+            "repo_name": repo_name,
+            "git_username": git_username,
+            "git_token": git_token,
+            "default_branch": default_branch,
+            "project_id": task.project_id,
+        }
+
+
+    # Context for post-processing after AI completes
+    _post_process_ctx: dict[int, dict] = {}
+
+    async def _post_process_task(task_id: int) -> None:
+        """After AI process completes: git commit/push, create PR, send callback."""
+        ctx = _post_process_ctx.pop(task_id, None)
+        if not ctx:
+            return
+
+        callback_url = ctx["callback_url"]
+        workdir = Path(ctx["workdir"])
+        auth_repo_url = ctx["auth_repo_url"]
+        repo_name = ctx["repo_name"]
+        git_username = ctx["git_username"]
+        git_token = ctx["git_token"]
+        default_branch = ctx["default_branch"]
+
+        # Check for AI blocking message in stdout
+        blocked = False
+        block_reason = ""
+        stdout_file = workdir / ".soda-stdout.log"
+        if stdout_file.exists():
+            try:
+                stdout_text = stdout_file.read_text().strip()
+                if stdout_text:
+                    last_lines = "\n".join(stdout_text.split("\n")[-10:])
+                    # Check if AI indicated it's blocked
+                    block_keywords = ["cannot complete", "blocked", "need help", "stuck", "unable to", "missing", "requires"]
+                    if any(kw in last_lines.lower() for kw in block_keywords):
+                        blocked = True
+                        block_reason = last_lines[:500]
+            except Exception:
+                pass
+
+        if blocked:
+            # AI reported it's blocked
+            _send_callback(callback_url, task_id, "blocked", question=block_reason)
+            return
+
+        # Git commit + push + PR
+        pr_url = await _git_commit_push_and_pr(
+            task_id=task_id,
+            workdir=workdir,
+            auth_repo_url=auth_repo_url,
+            repo_name=repo_name,
+            username=git_username,
+            token=git_token,
+            default_branch=default_branch,
+        )
+
+        if pr_url:
+            _send_callback(callback_url, task_id, "review", summary=f"PR: {pr_url}")
+        elif git_username and git_token:
+            # PR creation failed
+            _send_callback(callback_url, task_id, blocked=True, question="Failed to create PR")
+        else:
+            # No git auth
+            _send_callback(callback_url, task_id, "blocked", question="GitHub auth not configured")
+
+
+    def _send_callback(callback_url: str, task_id: int, status: str, question: str = None, summary: str = None) -> None:
+        """Update task status directly in DB (no HTTP callback to avoid loops)."""
+        import threading
+        def _update():
+            import asyncio as _asyncio
+            async def _do():
+                try:
+                    async with async_session() as session:
+                        task = await session.get(Task, task_id)
+                        if not task:
+                            return
+                        if status == "review":
+                            task.board_column = "review"
+                        elif status == "blocked":
+                            task.board_column = "blocked"
+                        content = ""
+                        if question:
+                            content = question
+                        elif summary:
+                            content = summary
+                        if content:
+                            session.add(TaskComment(task_id=task_id, author="Soda", content=content))
+                        await session.commit()
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).error(f"Post-process callback failed for task {task_id}: {e}")
+            try:
+                loop = _asyncio.new_event_loop()
+                loop.run_until_complete(_do())
+                loop.close()
+            except Exception:
+                pass
+        threading.Thread(target=_update, daemon=True).start()
+
+    async def _git_commit_push_and_pr(
+        self_none,  # not a method, ignore
+        task_id: int,
+        workdir: Path,
+        auth_repo_url: str,
+        repo_name: str,
+        username: str,
+        token: str,
+        default_branch: str,
+    ) -> Optional[str]:
+        """Commit task workdir changes, push feature branch, create PR. Returns PR URL or None."""
+        import logging
+        logger = logging.getLogger(__name__)
+        if not username or not token or not auth_repo_url:
+            return None
+        try:
+            feature_branch = f"task-{task_id}"
+            repo_workdir = Path(f"/tmp/soda-pr-workdirs/task-{task_id}")
+            repo_workdir.parent.mkdir(parents=True, exist_ok=True)
+            # Remove old
+            import shutil
+            if repo_workdir.exists():
+                shutil.rmtree(repo_workdir)
+            # Clone
+            repo = git.Repo.clone_from(auth_repo_url, repo_workdir)
+            try:
+                repo.git.checkout(default_branch)
+            except Exception:
+                repo.git.checkout("-b", default_branch)
+            repo.git.checkout("-b", feature_branch)
+            # Copy workdir contents
+            for item in workdir.iterdir():
+                if item.name.startswith(".soda-"):
+                    continue
+                dest = repo_workdir / item.name
+                if item.is_dir():
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(item, dest)
+                else:
+                    shutil.copy2(item, dest)
+            # Commit + push
+            repo.git.add(A=True)
+            if repo.is_dirty() or repo.untracked_files:
+                repo.index.commit(f"feat: task {task_id}")
+                repo.git.push("origin", feature_branch)
+                # Create PR via API
+                pr_data = {
+                    "title": f"Task {task_id}",
+                    "head": feature_branch,
+                    "base": default_branch,
+                    "body": f"Task {task_id} — created by Soda",
+                }
+                async with httpx.AsyncClient() as client:
+                    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+                    resp = await client.post(
+                        f"https://api.github.com/repos/{username}/{repo_name}/pulls",
+                        headers=headers, json=pr_data,
+                    )
+                    if resp.status_code in [200, 201]:
+                        pr_url = resp.json().get("html_url", "")
+                        logger.info(f"PR created: {pr_url}")
+                        return pr_url
+                    else:
+                        logger.error(f"PR failed: {resp.text}")
+                        return None
+            return None
+        except Exception as e:
+            logger.error(f"git/pr error for task {task_id}: {e}")
+            return None
 
     # ── Frontend pages ──────────────────────────────────────────────
 
@@ -1432,9 +1599,7 @@ Return ONLY valid JSON, no other text."""
         question: Optional[str] = Query(None),
         summary: Optional[str] = Query(None),
     ):
-        """Callback endpoint for the execute command to report status.
-        Accepts both JSON body and query parameters (OpenCode uses query params)."""
-        # If query params are present, use them; otherwise parse JSON body
+        """Callback endpoint. Saves AI output as comment, then triggers post-processing."""
         if taskId is not None and status is not None:
             payload = CallbackPayload(taskId=taskId, status=status, question=question, summary=summary)
         else:
@@ -1442,28 +1607,20 @@ Return ONLY valid JSON, no other text."""
                 body = await request.json()
                 payload = CallbackPayload(**body)
             except Exception:
-                raise HTTPException(422, "Invalid callback payload: provide taskId and status as query params or JSON body")
+                raise HTTPException(422, "Invalid callback payload")
         async with async_session() as session:
             task = await session.get(Task, payload.taskId)
             if not task:
                 raise HTTPException(404, "Task not found")
-
-            # Re-fetch task with fresh state to avoid race conditions
             await session.refresh(task)
             if task.board_column != "running":
                 return {"ok": True, "message": f"Ignored: task already in '{task.board_column}' state"}
 
             if payload.status == "blocked" and payload.question:
                 task.board_column = "blocked"
-                comment = TaskComment(
-                    task_id=task.id,
-                    author="AI",
-                    content=payload.question,
-                )
-                session.add(comment)
-
+                session.add(TaskComment(task_id=task.id, author="AI", content=payload.question))
             elif payload.status == "review":
-                # Collect AI output first (before any git operations)
+                # Collect AI output for comment
                 ai_output = ""
                 if payload.summary:
                     ai_output = f"**Summary:** {payload.summary}"
@@ -1472,136 +1629,42 @@ Return ONLY valid JSON, no other text."""
                 stderr_log = workdir / ".soda-stderr.log"
                 if stdout_log.exists():
                     try:
-                        stdout_text = stdout_log.read_text().strip()
-                        if stdout_text:
-                            ai_output += f"\n\n**AI Output:**\n{stdout_text[:3000]}"
+                        t = stdout_log.read_text().strip()
+                        if t:
+                            ai_output += f"\n\n**AI Output:**\n{t[:3000]}"
                     except Exception:
                         pass
                 if stderr_log.exists():
                     try:
-                        stderr_text = stderr_log.read_text().strip()
-                        if stderr_text:
-                            ai_output += f"\n\n**Stderr:**\n{stderr_text[:500]}"
+                        t = stderr_log.read_text().strip()
+                        if t:
+                            ai_output += f"\n\n**Stderr:**\n{t[:500]}"
                     except Exception:
                         pass
-                # Close process fds and clean up
-                if payload.taskId in running_processes:
-                    proc_info = running_processes[payload.taskId]
-                    if isinstance(proc_info, tuple):
-                        proc, stdout_fd, stderr_fd = proc_info
-                        try:
-                            stdout_fd.close()
-                            stderr_fd.close()
-                        except Exception:
-                            pass
-                    try:
-                        if isinstance(proc_info, tuple):
-                            await asyncio.wait_for(proc_info[0].wait(), timeout=10)
-                        else:
-                            await asyncio.wait_for(proc_info.wait(), timeout=10)
-                    except Exception:
-                        pass
-                # List files in task workdir
                 if workdir.exists():
                     files = [f for f in workdir.iterdir() if not f.name.startswith(".soda-")]
                     if files:
                         file_list = "\n".join(f"  • {f.name}{'/' if f.is_dir() else ''}" for f in sorted(files)[:30])
                         ai_output += f"\n\n**Files created:**\n{file_list}"
                 if ai_output:
-                    comment = TaskComment(task_id=task.id, author="AI", content=ai_output)
-                    session.add(comment)
+                    session.add(TaskComment(task_id=task.id, author="AI", content=ai_output))
 
-                # Try to create GitHub PR — if it fails, move to blocked instead of review
-                pr_created = False
-                pr_error = None
-                try:
-                    project = await session.get(Project, task.project_id)
-                    pr_username = await _get_setting(session, "git_username")
-                    pr_token = await _get_setting(session, "git_token")
-                    pr_default_branch = await _get_setting(session, "git_default_branch", "main")
-                    if pr_username and pr_token:
-                        # Use the project's repo name (set during project generation)
-                        repo_name = project.repo_name if project and project.repo_name else f"soda-{task.project_id}"
-                        pr_url = await _create_github_pr(
-                            session=session, task=task, project=project, workdir=workdir,
-                            username=pr_username, token=pr_token,
-                            repo_name=repo_name,
-                            default_branch=pr_default_branch,
-                        )
-                        if pr_url:
-                            pr_comment = TaskComment(task_id=task.id, author="Soda",
-                                content=f"📦 **Pull Request created:** {pr_url}")
-                            session.add(pr_comment)
-                            pr_created = True
-                    else:
-                        # Git auth not configured — can't create PR, move to blocked
-                        pr_error = "no_auth"
-                except Exception as e:
-                    pr_error = f"⚠️ Failed to create PR: {str(e)}"
-
-                if pr_error == "no_auth":
-                    task.board_column = "blocked"
-                    session.add(TaskComment(task_id=task.id, author="Soda",
-                        content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."))
-                elif pr_error:
-                    task.board_column = "blocked"
-                    session.add(TaskComment(task_id=task.id, author="Soda", content=pr_error))
-                elif pr_created:
-                    task.board_column = "review"
-                else:
-                    task.board_column = "review"
-
-                # Auto-review if review user configured (only if we made it to review)
-                if task.board_column == "review" and project and project.review_user_id:
-                    reviewer = await session.get(User, project.review_user_id)
-                    if reviewer and reviewer.type == "ai":
-                        _write_opencode_auth(reviewer)
-                        # Run review via OpenCode
-                        review_prompt = f"""Review this task:
-Title: {task.title}
-Description: {task.description}
-
-Provide a concise review. Focus on: code quality, completeness, and any issues.
-Return your review as JSON:
-{{"approved": true/false, "comments": "..."}}"""
-
-                        proc = await asyncio.create_subprocess_shell(
-                            f'opencode run {json.dumps(review_prompt)}',
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-                        output = stdout.decode().strip()
-                        jm = re.search(r'\{[\s\S]*\}', output)
-                        if jm:
-                            try:
-                                review_result = json.loads(jm.group())
-                                review_comment = TaskComment(
-                                    task_id=task.id,
-                                    author=reviewer.name,
-                                    content=review_result.get("comments", "Review completed."),
-                                )
-                                session.add(review_comment)
-                            except json.JSONDecodeError:
-                                pass
-
-            # Clean up process tracker
+            # Clean up running process
             if payload.taskId in running_processes:
                 proc_info = running_processes[payload.taskId]
                 if isinstance(proc_info, tuple):
-                    proc = proc_info[0]
-                else:
-                    proc = proc_info
-                if proc.returncode is None:
                     try:
-                        proc.kill()
-                        await proc.wait()
+                        proc_info[1].close()
+                        proc_info[2].close()
                     except Exception:
                         pass
                 del running_processes[payload.taskId]
 
             await session.commit()
-            return {"ok": True, "column": task.board_column}
+
+        # Trigger post-processing (git/PR/auto-review)
+        asyncio.create_task(_post_process_task(payload.taskId))
+        return {"ok": True}
 
     # ── API: Git Commit & Push ─────────────────────────────────────
 
@@ -2119,30 +2182,8 @@ tmp/
                             proc = proc_info
                         
                         if proc.returncode is not None:
-                            # Process exited but callback didn't arrive
-                            exit_code = proc.returncode
-                            _watchdog_logger.warning(f"Task {task.id} process exited with code {exit_code}, moving to blocked")
-                            
-                            # Try to read stdout/stderr for error info
-                            error_info = ""
-                            workdir = Path(f"/tmp/soda-task-workdirs/task-{task.id}")
-                            stderr_log = workdir / ".soda-stderr.log"
-                            if stderr_log.exists():
-                                try:
-                                    stderr_text = stderr_log.read_text().strip()
-                                    if stderr_text:
-                                        error_info = f"\n\n**Stderr:**\n{stderr_text[:500]}"
-                                except Exception:
-                                    pass
-                            
-                            task.board_column = "blocked"
-                            comment = TaskComment(
-                                task_id=task.id,
-                                author="Soda",
-                                content=f"⚠️ Watchdog: Process exited with code {exit_code} but no callback was received. Task moved to blocked.{error_info}"
-                            )
-                            session.add(comment)
-                            
+                            # Process exited — run post-processing (git/PR/callback)
+                            _watchdog_logger.info(f"Task {task.id} process exited with code {proc.returncode}, running post-processing")
                             # Clean up process tracker
                             if isinstance(proc_info, tuple):
                                 try:
@@ -2151,6 +2192,8 @@ tmp/
                                 except Exception:
                                     pass
                             del running_processes[task.id]
+                            # Run post-processing in background
+                            asyncio.create_task(_post_process_task(task.id))
                     
                     await session.commit()
             except Exception as e:
