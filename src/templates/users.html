@@ -13,13 +13,14 @@
         {% if u.role %}<p class="user-role">{{ u.role }}</p>{% endif %}
         {% if u.type == 'ai' %}
         <div class="user-details">
-            <div>Provider: <code>{{ u.provider or 'N/A' }}</code></div>
             <div>Model: <code>{{ u.model or 'N/A' }}</code></div>
         </div>
         {% endif %}
         <div class="user-actions">
             <button class="btn btn-sm" onclick="showEditUser({{ u.id }})">Edit</button>
+            {% if u.name not in ['Project Owner', 'Task Master', 'Junior Developer', 'Medior Developer', 'Senior Developer'] %}
             <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
+            {% endif %}
         </div>
     </div>
     {% else %}
@@ -54,20 +55,6 @@
                     <button type="button" class="btn btn-sm" onclick="fetchModels()">🔄 Load</button>
                 </div>
                 <p class="help-text" id="model-help">Click "Load" to fetch available models from OpenCode</p>
-                <label>System Prompt</label>
-                <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty of this AI agent..."></textarea>
-                <label>Execute Command</label>
-                <textarea name="execute_command" id="user-execute-command" rows="4" id="exec-cmd-field"></textarea>
-                <p class="help-text">
-                    Available variables:
-                    <code>&#123;&#123;task.id&#125;&#125;</code>
-                    <code>&#123;&#123;task.title&#125;&#125;</code>
-                    <code>&#123;&#123;task.description&#125;&#125;</code>
-                    <code>&#123;&#123;task.complexity&#125;&#125;</code>
-                    <code>&#123;&#123;task.comments&#125;&#125;</code>
-                    <code>&#123;&#123;project.name&#125;&#125;</code>
-                    <code>&#123;&#123;callback.url&#125;&#125;</code>
-                </p>
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
         </form>
@@ -75,19 +62,7 @@
 </div>
 
 <script>
-const DEFAULT_EXECUTE_CMD = `opencode run 'Task: {% raw %}{{task.title}}{% endraw %}
-
-Description: {% raw %}{{task.description}}{% endraw %}
-
-Complexity: {% raw %}{{task.complexity}}{% endraw %}
-
-Previous comments: {% raw %}{{task.comments}}{% endraw %}
-
-Working directory: {% raw %}{{task.workdir}}{% endraw %}
-
-IMPORTANT: Do all your work in the working directory above. Create files, write code, and commit your changes there.
-
-When done, call {% raw %}{{callback.url}}{% endraw %} with taskId={% raw %}{{task.id}}{% endraw %} and status=review. If you have questions, call with status=blocked and include your question.'`;
+const DEFAULT_EXECUTE_CMD = "opencode run '{{task.prompt}}'\n\nWorking directory: {{task.workdir}}\nCallback URL: {{callback.url}}?taskId={{task.id}}&status=review\nIf blocked: {{callback.url}}?taskId={{task.id}}&status=blocked&question=YOUR_QUESTION";
 
 async function fetchModels() {
     const helpText = document.getElementById('model-help');
@@ -121,7 +96,6 @@ function showCreateUser() {
     document.getElementById('user-modal-title').textContent = 'New User';
     document.getElementById('user-id').value = '';
     document.getElementById('user-form').reset();
-    document.getElementById('user-execute-command').value = DEFAULT_EXECUTE_CMD;
     document.getElementById('user-modal').style.display = 'flex';
     toggleAI('human');
 }
@@ -142,8 +116,6 @@ async function showEditUser(userId) {
 
     if (u.type === 'ai') {
         document.getElementById('user-model').value = u.model || '';
-        document.getElementById('user-system-prompt').value = u.system_prompt || '';
-        document.getElementById('user-execute-command').value = u.execute_command || DEFAULT_EXECUTE_CMD;
     }
 
     document.getElementById('user-modal').style.display = 'flex';

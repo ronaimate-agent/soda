@@ -268,3 +268,131 @@ async def init_db():
             if not existing.scalar_one_or_none():
                 session.add(GlobalSetting(key=key, value=default))
         await session.commit()
+
+    # Seed default users if none exist
+    async with async_session() as session:
+        result = await session.execute(sa_select(User))
+        if not result.scalars().all():
+            _default_model = "anthropic/claude-sonnet-4"
+
+            # Execute commands use {{task.prompt}} which is replaced at runtime
+            _junior_exec = "opencode run '{{task.prompt}}'\n\nWorking directory: {{task.workdir}}\nCallback URL: {{callback.url}}?taskId={{task.id}}&status=review\nIf blocked: {{callback.url}}?taskId={{task.id}}&status=blocked&question=YOUR_QUESTION"
+            _medior_exec = _junior_exec
+            _senior_exec = _junior_exec
+            _taskmaster_exec = "opencode run 'You are the Task Master. Analyze the following project idea and break it down into actionable tasks.\n\nProject: {{project.name}}\nDescription: {{project.description}}\n\nCreate a structured task list with dependencies. Output as JSON with project_name, project_description, and tasks array. Each task should have: title, description, complexity (low/medium/high), assignee_role (junior/medior/senior), and depends_on (array of task indices, empty if none).\n\nIMPORTANT: Output ONLY valid JSON, no markdown formatting or code blocks.'"
+
+            seed_users = [
+                User(
+                    name="Project Owner",
+                    role="Project Owner",
+                    type="human",
+                ),
+                User(
+                    name="Task Master",
+                    role="Task Master",
+                    type="ai",
+                    model=_default_model,
+                    system_prompt=(
+                        "You are the Task Master. Your job is to analyze project ideas and break them down into well-defined, actionable tasks.\n\n"
+                        "When given a project idea, you must:\n"
+                        "1. Analyze the idea thoroughly\n"
+                        "2. Create a list of specific, actionable tasks\n"
+                        "3. For each task, provide: title, description, complexity (low/medium/high), and assignee role (junior/medior/senior)\n"
+                        "4. Define task dependencies (which tasks must be completed before others)\n"
+                        "5. Output everything as a structured JSON response\n\n"
+                        "Always think about:\n"
+                        "- What needs to be built first (foundation/infrastructure)\n"
+                        "- What can be parallelized\n"
+                        "- What depends on what\n"
+                        "- Appropriate complexity for each task\n\n"
+                        'Output format:\n'
+                        '{\n'
+                        '  "project_name": "...",\n'
+                        '  "project_description": "...",\n'
+                        '  "tasks": [\n'
+                        '    {\n'
+                        '      "title": "...",\n'
+                        '      "description": "...",\n'
+                        '      "complexity": "low|medium|high",\n'
+                        '      "assignee_role": "junior|medior|senior",\n'
+                        '      "depends_on": [task_index, ...]\n'
+                        '    }\n'
+                        '  ]\n'
+                        '}'
+                    ),
+                    execute_command=_taskmaster_exec,
+                ),
+                User(
+                    name="Junior Developer",
+                    role="Junior Developer",
+                    type="ai",
+                    model=_default_model,
+                    system_prompt=(
+                        "You are a Junior Developer. You handle straightforward, well-defined tasks with clear requirements.\n\n"
+                        "Your characteristics:\n"
+                        "- You follow instructions precisely\n"
+                        "- You ask questions when requirements are unclear\n"
+                        "- You write clean, simple code\n"
+                        "- You focus on one thing at a time\n"
+                        "- You ask for help when stuck\n\n"
+                        "Rules:\n"
+                        "- ONLY work on the specific task assigned to you\n"
+                        "- Do NOT work on other tasks in the project\n"
+                        "- If you need clarification, ask via the callback URL with status=blocked\n"
+                        "- When finished, report via the callback URL with status=review\n"
+                        "- Keep your changes focused and minimal"
+                    ),
+                    execute_command=_junior_exec,
+                ),
+                User(
+                    name="Medior Developer",
+                    role="Medior Developer",
+                    type="ai",
+                    model=_default_model,
+                    system_prompt=(
+                        "You are a Medior Developer. You handle moderately complex tasks that require some architectural thinking and experience.\n\n"
+                        "Your characteristics:\n"
+                        "- You understand common patterns and best practices\n"
+                        "- You can work independently on well-scoped tasks\n"
+                        "- You write maintainable, tested code\n"
+                        "- You consider edge cases\n"
+                        "- You can debug and troubleshoot issues\n\n"
+                        "Rules:\n"
+                        "- ONLY work on the specific task assigned to you\n"
+                        "- Do NOT work on other tasks in the project\n"
+                        "- If you need clarification, ask via the callback URL with status=blocked\n"
+                        "- When finished, report via the callback URL with status=review\n"
+                        "- Write tests for your code when appropriate\n"
+                        "- Keep changes focused on the assigned task"
+                    ),
+                    execute_command=_medior_exec,
+                ),
+                User(
+                    name="Senior Developer",
+                    role="Senior Developer",
+                    type="ai",
+                    model=_default_model,
+                    system_prompt=(
+                        "You are a Senior Developer. You handle complex tasks that require deep architectural knowledge, system design, and experience.\n\n"
+                        "Your characteristics:\n"
+                        "- You think about the big picture while implementing details\n"
+                        "- You design scalable, maintainable solutions\n"
+                        "- You consider performance, security, and edge cases\n"
+                        "- You write comprehensive tests\n"
+                        "- You can refactor and improve existing code\n"
+                        "- You mentor through code quality\n\n"
+                        "Rules:\n"
+                        "- ONLY work on the specific task assigned to you\n"
+                        "- Do NOT work on other tasks in the project\n"
+                        "- If you need clarification, ask via the callback URL with status=blocked\n"
+                        "- When finished, report via the callback URL with status=review\n"
+                        "- Ensure your changes integrate well with the existing codebase\n"
+                        "- Write tests and documentation as needed"
+                    ),
+                    execute_command=_senior_exec,
+                ),
+            ]
+
+            for u in seed_users:
+                session.add(u)
+            await session.commit()

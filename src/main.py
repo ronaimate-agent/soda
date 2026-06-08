@@ -943,9 +943,43 @@ def create_app() -> FastAPI:
             await session.commit()
             await session.refresh(project)
 
+            # Resolve assignee role to user ID
+            def _resolve_assignee_id(assignee_role: str) -> Optional[int]:
+                """Map assignee_role (junior/medior/senior) to an existing AI user ID."""
+                role_map = {
+                    "junior": "Junior Developer",
+                    "medior": "Medior Developer",
+                    "medior": "Medior Developer",
+                    "senior": "Senior Developer",
+                }
+                target_name = role_map.get(assignee_role.lower() if assignee_role else "")
+                if not target_name:
+                    return None
+                # We'll look this up in the caller; for now return the name
+                return target_name
+
+            # Pre-resolve assignee names to user IDs
+            assignee_name_to_id: dict[str, int] = {}
+            for t in result.get("tasks", []):
+                role = t.get("assignee_role", "")
+                name = _resolve_assignee_id(role)
+                if name and name not in assignee_name_to_id:
+                    assignee_user = await session.execute(
+                        sa_select(User).where(User.name == name)
+                    )
+                    user_obj = assignee_user.scalar_one_or_none()
+                    if user_obj:
+                        assignee_name_to_id[name] = user_obj.id
+
             # Create tasks and track their DB IDs in order
             task_db_ids = []
             for i, t in enumerate(result.get("tasks", [])):
+                assignee_id = None
+                role = t.get("assignee_role", "")
+                resolved_name = _resolve_assignee_id(role)
+                if resolved_name:
+                    assignee_id = assignee_name_to_id.get(resolved_name)
+
                 task = Task(
                     project_id=project.id,
                     title=t.get("title", "Untitled"),
@@ -953,6 +987,7 @@ def create_app() -> FastAPI:
                     complexity=t.get("complexity"),
                     board_column="backlog",
                     position=i,
+                    assignee_id=assignee_id,
                 )
                 session.add(task)
                 await session.flush()  # Get the task ID
@@ -1005,10 +1040,19 @@ def create_app() -> FastAPI:
             if not idea:
                 raise HTTPException(404, "Idea not found")
             
-            # Use provided architect_user_id or fall back to idea's architect
+            # Use provided architect_user_id, fall back to idea's architect, then Task Master
             arch_id = architect_user_id or idea.architect_user_id
             if not arch_id:
-                raise HTTPException(400, "No architect user selected")
+                # Auto-select Task Master
+                task_master = await session.execute(
+                    sa_select(User).where(User.name == "Task Master")
+                )
+                tm = task_master.scalar_one_or_none()
+                if tm:
+                    arch_id = tm.id
+                    idea.architect_user_id = tm.id
+            if not arch_id:
+                raise HTTPException(400, "No architect user available. Please create a Task Master user first.")
             
             architect = await session.get(User, arch_id)
             if not architect or architect.type != "ai":
