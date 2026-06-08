@@ -181,6 +181,16 @@ async def init_db():
         """)
         if result.first() is None:
             await conn.exec_driver_sql("ALTER TABLE ideas ADD COLUMN created_by VARCHAR(255)")
+        
+        # Check if projects table has repo_name column
+        result = await conn.exec_driver_sql("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'projects' AND column_name = 'repo_name'
+        """)
+        if result.first() is None:
+            await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN repo_name VARCHAR(255)")
+            await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN repo_url VARCHAR(500)")
     
     # Initialize default settings
     async with async_session() as session:
