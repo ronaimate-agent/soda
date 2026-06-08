@@ -1827,6 +1827,89 @@ Return your review as JSON:
         """Health check endpoint."""
         return {"status": "ok", "service": "soda"}
 
+    # ── Background Watchdog ─────────────────────────────────────────
+    import logging
+    _watchdog_logger = logging.getLogger("watchdog")
+    
+    async def _watchdog_check():
+        """Periodically check running tasks for stuck processes."""
+        while True:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            try:
+                async with async_session() as session:
+                    # Find all tasks in running column
+                    result = await session.execute(
+                        sa_select(Task).where(Task.board_column == "running")
+                    )
+                    running_tasks = result.scalars().all()
+                    
+                    for task in running_tasks:
+                        proc_info = running_processes.get(task.id)
+                        
+                        # Case 1: Task is running but no process tracked → stuck
+                        if not proc_info:
+                            _watchdog_logger.warning(f"Task {task.id} has no running process, moving to blocked")
+                            task.board_column = "blocked"
+                            comment = TaskComment(
+                                task_id=task.id,
+                                author="Soda",
+                                content="⚠️ Watchdog: No running process found for this task. It may have crashed or failed to start. Task moved to blocked."
+                            )
+                            session.add(comment)
+                            continue
+                        
+                        # Case 2: Process has exited but task still running → stuck
+                        if isinstance(proc_info, tuple):
+                            proc = proc_info[0]
+                        else:
+                            proc = proc_info
+                        
+                        if proc.returncode is not None:
+                            # Process exited but callback didn't arrive
+                            exit_code = proc.returncode
+                            _watchdog_logger.warning(f"Task {task.id} process exited with code {exit_code}, moving to blocked")
+                            
+                            # Try to read stdout/stderr for error info
+                            error_info = ""
+                            workdir = Path(f"/tmp/soda-task-workdirs/task-{task.id}")
+                            stderr_log = workdir / ".soda-stderr.log"
+                            if stderr_log.exists():
+                                try:
+                                    stderr_text = stderr_log.read_text().strip()
+                                    if stderr_text:
+                                        error_info = f"\n\n**Stderr:**\n{stderr_text[:500]}"
+                                except Exception:
+                                    pass
+                            
+                            task.board_column = "blocked"
+                            comment = TaskComment(
+                                task_id=task.id,
+                                author="Soda",
+                                content=f"⚠️ Watchdog: Process exited with code {exit_code} but no callback was received. Task moved to blocked.{error_info}"
+                            )
+                            session.add(comment)
+                            
+                            # Clean up process tracker
+                            if isinstance(proc_info, tuple):
+                                try:
+                                    proc_info[1].close()
+                                    proc_info[2].close()
+                                except Exception:
+                                    pass
+                            del running_processes[task.id]
+                    
+                    await session.commit()
+            except Exception as e:
+                _watchdog_logger.error(f"Watchdog error: {e}")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await init_db()
+        # Start watchdog in background
+        watchdog_task = asyncio.create_task(_watchdog_check())
+        yield
+        watchdog_task.cancel()
+
     # ── Static files ───────────────────────────────────────────────
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
