@@ -34,12 +34,9 @@
             <p>Create at: <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a></p>
         </div>
 
-        <label>Default Repository</label>
-        <input type="text" name="git_default_repo" value="{{ settings.get('git_default_repo', '') }}" placeholder="my-project" class="input-mono">
-        <p class="help-text">Default repo name (without owner). Will be auto-created if it doesn't exist.</p>
-
         <label>Default Branch</label>
         <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
+        <p class="help-text">Default branch name for new repositories.</p>
 
         <h3>📋 Task Lifecycle</h3>
         <div class="lifecycle-diagram">

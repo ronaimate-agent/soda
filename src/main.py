@@ -1539,8 +1539,8 @@ Return ONLY valid JSON, no other text."""
                     pr_error = f"⚠️ Failed to create PR: {str(e)}"
 
                 if pr_error:
-                    # PR creation failed — move to blocked with error info
-                    task.board_column = "blocked"
+                    # PR creation failed or auth missing — still move to review, just add a note
+                    task.board_column = "review"
                     error_comment = TaskComment(task_id=task.id, author="Soda", content=pr_error)
                     session.add(error_comment)
                 elif pr_created:
