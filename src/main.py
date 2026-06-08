@@ -646,7 +646,35 @@ def create_app() -> FastAPI:
             raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
 
     async def _create_project_from_result(idea: "Idea", result: dict) -> dict:
-        """Create project and tasks from architect generate response."""
+        """Create project and tasks from architect generate response.
+        Also creates a GitHub repo for the project if git auth is configured."""
+        # First, verify GitHub auth is configured
+        async with async_session() as session:
+            username = await _get_setting(session, "git_username")
+            token = await _get_setting(session, "git_token")
+
+        if not username or not token:
+            raise HTTPException(400,
+                "⚠️ GitHub auth is required to generate projects. "
+                "Please configure git_username and git_token in Settings → GitHub. "
+                "The token needs 'repo' scope to create repositories."
+            )
+
+        # Create GitHub repo for the project
+        repo_name = result.get("project_name", idea.title).lower().replace(" ", "-").replace("[^a-z0-9-]", "")
+        # Sanitize repo name
+        repo_name = re.sub(r'[^a-z0-9-]', '', repo_name)[:100]
+
+        ensure_result = await _ensure_github_repo(username, repo_name, token)
+        if ensure_result["status"] == "error":
+            raise HTTPException(400,
+                f"⚠️ Failed to create GitHub repo '{repo_name}': {ensure_result['message']}. "
+                "Please check your git_token has 'repo' scope and the repo name is valid."
+            )
+
+        repo_url = ensure_result["data"].get("html_url", f"https://github.com/{username}/{repo_name}")
+
+        # Create project and tasks in DB
         async with async_session() as session:
             project = Project(
                 name=result.get("project_name", idea.title),
@@ -677,6 +705,8 @@ def create_app() -> FastAPI:
             "project_id": project.id,
             "project_name": project.name,
             "tasks_count": len(result.get("tasks", [])),
+            "repo_url": repo_url,
+            "repo_name": repo_name,
         }
 
     @app.post("/api/ideas/{idea_id}/generate")
@@ -1122,8 +1152,48 @@ Return ONLY valid JSON, no other text."""
                     )
                     session.add(comment)
 
+                # Auto-create GitHub PR for the reviewed task
+                pr_url = None
+                if workdir.exists():
+                    # Get project for PR creation
+                    project = await session.get(Project, task.project_id)
+                    # Get git settings for PR creation
+                    pr_username = await _get_setting(session, "git_username")
+                    pr_token = await _get_setting(session, "git_token")
+                    pr_default_repo = await _get_setting(session, "git_default_repo")
+                    pr_default_branch = await _get_setting(session, "git_default_branch", "main")
+                    if pr_username and pr_token:
+                        # Determine repo name: use project-specific repo or default
+                        repo_name = pr_default_repo
+                        if project and project.name:
+                            repo_name = pr_default_repo or re.sub(r'[^a-z0-9-]', '', project.name.lower().replace(' ', '-'))[:100]
+                        pr_url = await _create_github_pr(
+                            session=session,
+                            task=task,
+                            project=project,
+                            workdir=workdir,
+                            username=pr_username,
+                            token=pr_token,
+                            repo_name=repo_name or f"soda-{task.project_id}",
+                            default_branch=pr_default_branch,
+                        )
+                        if pr_url:
+                            pr_comment = TaskComment(
+                                task_id=task.id,
+                                author="Soda",
+                                content=f"📦 **Pull Request created:** {pr_url}",
+                            )
+                            session.add(pr_comment)
+                    else:
+                        # No git auth configured, add a note
+                        no_auth_comment = TaskComment(
+                            task_id=task.id,
+                            author="Soda",
+                            content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs.",
+                        )
+                        session.add(no_auth_comment)
+
                 # Auto-review if review user configured
-                project = await session.get(Project, task.project_id)
                 if project and project.review_user_id:
                     reviewer = await session.get(User, project.review_user_id)
                     if reviewer and reviewer.type == "ai":
@@ -1184,6 +1254,128 @@ Return your review as JSON:
         )
         setting = result.scalar_one_or_none()
         return setting.value if setting else default
+
+    async def _create_github_pr(
+        session,
+        task: Task,
+        project: "Project",
+        workdir: Path,
+        username: str,
+        token: str,
+        repo_name: str,
+        default_branch: str,
+    ) -> Optional[str]:
+        """Create a GitHub PR for a reviewed task. Returns PR URL or None."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        # Determine the project's repo name from the task's git state or use default
+        result = await session.execute(
+            sa_select(TaskGitState).where(TaskGitState.task_id == task.id)
+        )
+        git_state = result.scalar_one_or_none()
+
+        # Use the project's repo (from git_state) or fall back to default_repo
+        target_repo = git_state.repo if git_state and git_state.repo else repo_name
+        target_branch = git_state.branch if git_state and git_state.branch else default_branch
+
+        # Create a feature branch for this task
+        feature_branch = f"task-{task.id}-{re.sub(r'[^a-z0-9-]', '', task.title.lower().replace(' ', '-'))[:50]}"
+
+        # Clone or update the repo
+        repo_workdir = Path(f"/tmp/soda-pr-workdirs/task-{task.id}")
+        repo_workdir.parent.mkdir(parents=True, exist_ok=True)
+
+        repo_url = f"https://{username}:{token}@github.com/{username}/{target_repo}.git"
+
+        try:
+            if repo_workdir.exists():
+                repo = git.Repo(repo_workdir)
+                origin = repo.remotes.origin
+                origin.fetch()
+                # Checkout the target branch
+                try:
+                    repo.git.checkout(target_branch)
+                except Exception:
+                    repo.git.checkout('-b', target_branch)
+                origin.pull()
+            else:
+                repo = git.Repo.clone_from(repo_url, repo_workdir)
+                try:
+                    repo.git.checkout(target_branch)
+                except Exception:
+                    repo.git.checkout('-b', target_branch)
+
+            # Create feature branch
+            repo.git.checkout('-b', feature_branch)
+
+            # Copy task workdir contents to repo (excluding .soda-* logs)
+            if workdir.exists():
+                for item in workdir.iterdir():
+                    if item.name.startswith(".soda-"):
+                        continue
+                    dest = repo_workdir / item.name
+                    if item.is_dir():
+                        if dest.exists():
+                            import shutil
+                            shutil.rmtree(dest)
+                        import shutil
+                        shutil.copytree(item, dest)
+                    else:
+                        import shutil
+                        shutil.copy2(item, dest)
+
+            # Also create/update task info file
+            task_info_file = repo_workdir / f"task-{task.id}-info.md"
+            task_info = f"""# Task {task.id}: {task.title}
+
+**Status:** {task.board_column}
+**Created:** {task.created_at}
+**Description:**
+{task.description or 'No description'}
+
+---
+*Auto-generated by Soda*
+"""
+            task_info_file.write_text(task_info)
+
+            # Commit and push
+            repo.git.add(A=True)
+            if repo.is_dirty() or repo.untracked_files:
+                commit_msg = f"feat: task {task.id} - {task.title}"
+                repo.index.commit(commit_msg)
+                repo.git.push('origin', feature_branch)
+
+                # Create PR via GitHub API
+                pr_url = f"https://api.github.com/repos/{username}/{target_repo}/pulls"
+                pr_data = {
+                    "title": f"Task {task.id}: {task.title}",
+                    "head": feature_branch,
+                    "base": target_branch,
+                    "body": f"## Task {task.id}: {task.title}\n\n{task.description or 'No description'}\n\n**Complexity:** {task.complexity or 'N/A'}\n\n*Created by Soda*",
+                }
+                async with httpx.AsyncClient() as client:
+                    pr_resp = await client.post(pr_url, headers=headers, json=pr_data)
+                    if pr_resp.status_code in [200, 201]:
+                        pr_json = pr_resp.json()
+                        pr_html_url = pr_json.get("html_url", "")
+                        logger.info(f"Created PR: {pr_html_url}")
+                        return pr_html_url
+                    else:
+                        logger.error(f"PR creation failed: {pr_resp.text}")
+                        return None
+            else:
+                logger.info(f"No changes to commit for task {task.id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error creating PR for task {task.id}: {e}")
+            return None
 
     async def _ensure_github_repo(owner: str, repo_name: str, token: str) -> dict:
         """Ensure the GitHub repository exists, create if it doesn't."""

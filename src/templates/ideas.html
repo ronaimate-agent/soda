@@ -213,7 +213,11 @@ async function generateProject() {
         overlay.style.display = 'none';
 
         if (data.status === 'generated') {
-            alert(`✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
+            let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
+            if (data.repo_url) {
+                msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
+            }
+            alert(msg);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
             window.location.reload();
@@ -260,7 +264,11 @@ async function submitAnswers(ideaId) {
         overlay.style.display = 'none';
 
         if (data.status === 'generated') {
-            alert(`✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
+            let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
+            if (data.repo_url) {
+                msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
+            }
+            alert(msg);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
             window.location.reload();
