@@ -268,6 +268,8 @@ def create_app() -> FastAPI:
                 comments_map[t.id] = cr.scalars().all()
                 # Attach has_unmet_deps flag
                 t.has_unmet_deps = t.id in unmet_ids
+                # Attach is_running flag for animation
+                t.is_running = t.board_column == "running"
 
         return templates.TemplateResponse(
             "board.html",

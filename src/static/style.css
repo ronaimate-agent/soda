@@ -573,6 +573,29 @@ textarea { resize: vertical; min-height: 60px; }
 .task-blocked-dep:hover {
     opacity: 0.7;
 }
+
+/* ── Running task animation ─────────────────────────── */
+.task-card.running-task {
+    border-color: var(--blue) !important;
+    box-shadow: 0 0 12px rgba(68, 138, 255, 0.4);
+    animation: pulse-running 2s ease-in-out infinite;
+}
+
+@keyframes pulse-running {
+    0%, 100% { box-shadow: 0 0 12px rgba(68, 138, 255, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(68, 138, 255, 0.7); }
+}
+
+.sand-clock {
+    display: inline-block;
+    animation: spin 3s linear infinite;
+    font-size: 0.9em;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
 .git-status {
     margin: 8px 0;
     font-size: 0.85em;

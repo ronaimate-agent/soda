@@ -28,13 +28,13 @@
         </div>
         <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
             {% for task in tasks if task.board_column == col %}
-            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.has_unmet_deps %}task-blocked-dep{% endif %}" 
+            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.has_unmet_deps %}task-blocked-dep{% endif %} {% if task.is_running %}running-task{% endif %}" 
                  draggable="{% if not task.has_unmet_deps %}true{% else %}false{% endif %}" 
                  ondragstart="drag(event)" 
                  data-task-id="{{ task.id }}" 
                  onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
-                    <span class="card-title">{{ task.title }}</span>
+                    <span class="card-title">{% if task.is_running %}<span class="sand-clock" title="In progress">⏳</span> {% endif %}{{ task.title }}</span>
                 </div>
                 {% if task.complexity %}
                 <span class="badge complexity-{{ task.complexity|lower }}">{{ task.complexity }}</span>
@@ -416,6 +416,50 @@ document.querySelectorAll('.modal').forEach(m => {
         if (e.target === m) m.style.display = 'none';
     });
 });
+
+// ── Auto Refresh ─────────────────────────────────────
+let refreshInterval = null;
+
+function startAutoRefresh() {
+    if (refreshInterval) clearInterval(refreshInterval);
+    refreshInterval = setInterval(() => {
+        // Only refresh if no modal is open
+        const openModal = document.querySelector('.modal[style*="flex"]');
+        if (!openModal) {
+            refreshBoard();
+        }
+    }, 5000); // 5 seconds
+}
+
+async function refreshBoard() {
+    try {
+        const res = await fetch(window.location.href);
+        const text = await res.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(text, 'text/html');
+        
+        // Update each column's card list
+        const columns = ['backlog', 'running', 'blocked', 'review', 'done'];
+        for (const col of columns) {
+            const newCol = doc.querySelector(`.card-list[data-column="${col}"]`);
+            const curCol = document.querySelector(`.card-list[data-column="${col}"]`);
+            if (newCol && curCol) {
+                curCol.innerHTML = newCol.innerHTML;
+            }
+            // Update task count
+            const newHeader = doc.querySelector(`.column[data-column="${col}"] .task-count`);
+            const curHeader = document.querySelector(`.column[data-column="${col}"] .task-count`);
+            if (newHeader && curHeader) {
+                curHeader.textContent = newHeader.textContent;
+            }
+        }
+    } catch (e) {
+        // Silently fail — will retry next interval
+    }
+}
+
+// Start auto-refresh when page loads
+startAutoRefresh();
 
 // ── Git Commit & Push ─────────────────────────────────
 function showGitCommitModal(taskId) {
