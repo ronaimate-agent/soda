@@ -1317,6 +1317,11 @@ Return ONLY valid JSON, no other text."""
             if not task:
                 raise HTTPException(404, "Task not found")
 
+            # Re-fetch task with fresh state to avoid race conditions
+            await session.refresh(task)
+            if task.board_column != "running":
+                return {"ok": True, "message": f"Ignored: task already in '{task.board_column}' state"}
+
             if payload.status == "blocked" and payload.question:
                 task.board_column = "blocked"
                 comment = TaskComment(
