@@ -1534,24 +1534,28 @@ Return ONLY valid JSON, no other text."""
                             session.add(pr_comment)
                             pr_created = True
                     else:
-                        pr_error = "⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."
+                        # Git auth not configured — not critical, just warn
+                        pr_error = "no_auth"
                 except Exception as e:
                     pr_error = f"⚠️ Failed to create PR: {str(e)}"
 
-                if pr_error:
-                    # PR creation failed or auth missing — still move to review, just add a note
+                if pr_error == "no_auth":
+                    # No git auth — move to review with a warning note
                     task.board_column = "review"
+                    no_auth_comment = TaskComment(task_id=task.id, author="Soda",
+                        content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs.")
+                    session.add(no_auth_comment)
+                elif pr_error:
+                    # PR creation failed with an error — move to blocked
+                    task.board_column = "blocked"
                     error_comment = TaskComment(task_id=task.id, author="Soda", content=pr_error)
                     session.add(error_comment)
                 elif pr_created:
                     # PR created successfully — move to review
                     task.board_column = "review"
                 else:
-                    # No git auth configured — still move to review but with a note
+                    # No PR attempted (no auth) — move to review
                     task.board_column = "review"
-                    no_auth_comment = TaskComment(task_id=task.id, author="Soda",
-                        content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs.")
-                    session.add(no_auth_comment)
 
                 # Auto-review if review user configured (only if we made it to review)
                 if task.board_column == "review" and project and project.review_user_id:
