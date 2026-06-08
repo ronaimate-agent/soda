@@ -442,28 +442,35 @@ def create_app() -> FastAPI:
             if not project:
                 raise HTTPException(404, "Project not found")
             
-            # Delete all task comments and git states for this project's tasks
+            # Get all tasks for this project
             result = await session.execute(
                 sa_select(Task).where(Task.project_id == project_id)
             )
             tasks = result.scalars().all()
-            for task in tasks:
-                # Delete comments
+            task_ids = [t.id for t in tasks]
+            
+            if task_ids:
+                # Delete task comments
                 await session.execute(
-                    TaskComment.__table__.delete().where(TaskComment.task_id == task.id)
+                    TaskComment.__table__.delete().where(TaskComment.task_id.in_(task_ids))
                 )
-                # Delete git state
+                # Delete task git states
                 await session.execute(
-                    TaskGitState.__table__.delete().where(TaskGitState.task_id == task.id)
+                    TaskGitState.__table__.delete().where(TaskGitState.task_id.in_(task_ids))
                 )
-                # Delete dependencies
-                await session.execute(
-                    TaskDependency.__table__.delete().where(
-                        (TaskDependency.task_id == task.id) | (TaskDependency.depends_on_task_id == task.id)
+                # Delete task dependencies (both directions)
+                try:
+                    await session.execute(
+                        TaskDependency.__table__.delete().where(
+                            TaskDependency.task_id.in_(task_ids) | 
+                            TaskDependency.depends_on_id.in_(task_ids)
+                        )
                     )
-                )
-                # Delete the task
-                await session.delete(task)
+                except Exception:
+                    pass  # Table might not exist or have different structure
+                # Delete the tasks
+                for task in tasks:
+                    await session.delete(task)
             
             # Delete the project
             await session.delete(project)
@@ -1158,12 +1165,10 @@ Return ONLY valid JSON, no other text."""
                 session.add(comment)
 
             elif payload.status == "review":
-                task.board_column = "review"
-                # Collect AI output: summary + stdout log + workdir file listing
+                # Collect AI output first (before any git operations)
                 ai_output = ""
                 if payload.summary:
                     ai_output = f"**Summary:** {payload.summary}"
-                # Read stdout/stderr log files from workdir
                 workdir = Path(f"/tmp/soda-task-workdirs/task-{payload.taskId}")
                 stdout_log = workdir / ".soda-stdout.log"
                 stderr_log = workdir / ".soda-stderr.log"
@@ -1191,7 +1196,6 @@ Return ONLY valid JSON, no other text."""
                             stderr_fd.close()
                         except Exception:
                             pass
-                    # Wait for process to finish
                     try:
                         if isinstance(proc_info, tuple):
                             await asyncio.wait_for(proc_info[0].wait(), timeout=10)
@@ -1199,63 +1203,62 @@ Return ONLY valid JSON, no other text."""
                             await asyncio.wait_for(proc_info.wait(), timeout=10)
                     except Exception:
                         pass
-                # List files in task workdir (excluding .soda-* logs)
+                # List files in task workdir
                 if workdir.exists():
                     files = [f for f in workdir.iterdir() if not f.name.startswith(".soda-")]
                     if files:
                         file_list = "\n".join(f"  • {f.name}{'/' if f.is_dir() else ''}" for f in sorted(files)[:30])
                         ai_output += f"\n\n**Files created:**\n{file_list}"
                 if ai_output:
-                    comment = TaskComment(
-                        task_id=task.id,
-                        author="AI",
-                        content=ai_output,
-                    )
+                    comment = TaskComment(task_id=task.id, author="AI", content=ai_output)
                     session.add(comment)
 
-                # Auto-create GitHub PR for the reviewed task
-                pr_url = None
-                if workdir.exists():
-                    # Get project for PR creation
+                # Try to create GitHub PR — if it fails, move to blocked instead of review
+                pr_created = False
+                pr_error = None
+                try:
                     project = await session.get(Project, task.project_id)
-                    # Get git settings for PR creation
                     pr_username = await _get_setting(session, "git_username")
                     pr_token = await _get_setting(session, "git_token")
                     pr_default_repo = await _get_setting(session, "git_default_repo")
                     pr_default_branch = await _get_setting(session, "git_default_branch", "main")
                     if pr_username and pr_token:
-                        # Determine repo name: use project-specific repo or default
                         repo_name = pr_default_repo
                         if project and project.name:
                             repo_name = pr_default_repo or re.sub(r'[^a-z0-9-]', '', project.name.lower().replace(' ', '-'))[:100]
                         pr_url = await _create_github_pr(
-                            session=session,
-                            task=task,
-                            project=project,
-                            workdir=workdir,
-                            username=pr_username,
-                            token=pr_token,
+                            session=session, task=task, project=project, workdir=workdir,
+                            username=pr_username, token=pr_token,
                             repo_name=repo_name or f"soda-{task.project_id}",
                             default_branch=pr_default_branch,
                         )
                         if pr_url:
-                            pr_comment = TaskComment(
-                                task_id=task.id,
-                                author="Soda",
-                                content=f"📦 **Pull Request created:** {pr_url}",
-                            )
+                            pr_comment = TaskComment(task_id=task.id, author="Soda",
+                                content=f"📦 **Pull Request created:** {pr_url}")
                             session.add(pr_comment)
+                            pr_created = True
                     else:
-                        # No git auth configured, add a note
-                        no_auth_comment = TaskComment(
-                            task_id=task.id,
-                            author="Soda",
-                            content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs.",
-                        )
-                        session.add(no_auth_comment)
+                        pr_error = "⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."
+                except Exception as e:
+                    pr_error = f"⚠️ Failed to create PR: {str(e)}"
 
-                # Auto-review if review user configured
-                if project and project.review_user_id:
+                if pr_error:
+                    # PR creation failed — move to blocked with error info
+                    task.board_column = "blocked"
+                    error_comment = TaskComment(task_id=task.id, author="Soda", content=pr_error)
+                    session.add(error_comment)
+                elif pr_created:
+                    # PR created successfully — move to review
+                    task.board_column = "review"
+                else:
+                    # No git auth configured — still move to review but with a note
+                    task.board_column = "review"
+                    no_auth_comment = TaskComment(task_id=task.id, author="Soda",
+                        content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs.")
+                    session.add(no_auth_comment)
+
+                # Auto-review if review user configured (only if we made it to review)
+                if task.board_column == "review" and project and project.review_user_id:
                     reviewer = await session.get(User, project.review_user_id)
                     if reviewer and reviewer.type == "ai":
                         _write_opencode_auth(reviewer)
