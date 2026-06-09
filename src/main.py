@@ -21,6 +21,7 @@ from .database import (
     GlobalSetting, Idea, Project, Task, TaskComment, TaskDependency, User,
     TaskGitState, async_session, init_db, sa_select,
 )
+from .utils import get_setting, get_opencode_api_key, write_opencode_auth
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -162,9 +163,9 @@ def create_app() -> FastAPI:
             repo_name = project.repo_name if project else ""
             repo_url = project.repo_url if project else ""
 
-            git_username = await _get_setting(session, "git_username")
-            git_token = await _get_setting(session, "git_token")
-            default_branch = await _get_setting(session, "git_default_branch", "main")
+            git_username = await get_setting("git_username")
+            git_token = await get_setting("git_token")
+            default_branch = await get_setting("git_default_branch", "main")
 
             remaining_result = await session.execute(
                 sa_select(Task).where(
@@ -1121,9 +1122,8 @@ def create_app() -> FastAPI:
         Also creates a GitHub repo for the project.
         If repo creation fails, the entire project generation fails (no tasks created)."""
         # First, verify GitHub auth is configured
-        async with async_session() as session:
-            username = await _get_setting(session, "git_username")
-            token = await _get_setting(session, "git_token")
+        username = await get_setting("git_username")
+        token = await get_setting("git_token")
 
         if not username or not token:
             raise HTTPException(400,
