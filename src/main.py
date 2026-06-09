@@ -1,12 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Any
 
 import git
 import httpx
@@ -25,8 +26,27 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 OPENCODE_AUTH = Path("/root/.local/share/opencode/auth.json")
 
-# In-memory process tracker: task_id -> asyncio.subprocess.Process
-running_processes: dict[int, asyncio.subprocess.Process] = {}
+# In-memory process tracker: task_id -> (asyncio.subprocess.Process, stdout_fd, stderr_fd)
+running_processes: dict[int, Tuple[asyncio.subprocess.Process, Any, Any]] = {}
+
+# Idempotency guard: track tasks currently being post-processed
+_processing_tasks: set[int] = set()
+
+# Context for post-processing after AI completes
+_post_process_ctx: dict[int, dict] = {}
+
+# Centralized logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/soda.log')
+    ]
+)
+logger = logging.getLogger("soda")
+git_logger = logging.getLogger("soda.git")
+watchdog_logger = logging.getLogger("soda.watchdog")
 
 
 # ─── Pydantic models ────────────────────────────────────────────────
@@ -45,14 +65,6 @@ class TaskMovePayload(BaseModel):
 class CommentPayload(BaseModel):
     content: str
     author: str = "user"
-
-
-# ─── Lifespan ───────────────────────────────────────────────────────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    yield
 
 
 # ─── App factory ────────────────────────────────────────────────────
@@ -913,14 +925,14 @@ def create_app() -> FastAPI:
             # If moving from blocked to running, kill old process if any
             if old_column == "blocked" and new_column == "running":
                 if task.id in running_processes:
-                    proc = running_processes[task.id]
+                    proc, stdout_fd, stderr_fd = running_processes[task.id]
                     if proc.returncode is None:
                         proc.kill()
                     del running_processes[task.id]
 
             # If moving to backlog, kill process
             if new_column == "backlog" and task.id in running_processes:
-                proc = running_processes[task.id]
+                proc, stdout_fd, stderr_fd = running_processes[task.id]
                 if proc.returncode is None:
                     proc.kill()
                 del running_processes[task.id]
