@@ -299,104 +299,116 @@ def create_app() -> FastAPI:
 
     async def _post_process_task(task_id: int) -> None:
         """After AI process completes: git commit/push, create PR, update task status."""
-        ctx = _post_process_ctx.pop(task_id, None)
-        if not ctx:
+        # Idempotency guard: prevent duplicate processing
+        if task_id in _processing_tasks:
+            logger.info(f"Task {task_id} already being processed, skipping")
             return
-
-        workdir = Path(ctx["workdir"])
-        auth_repo_url = ctx["auth_repo_url"]
-        repo_name = ctx["repo_name"]
-        git_username = ctx["git_username"]
-        git_token = ctx["git_token"]
-        default_branch = ctx["default_branch"]
-
-        # Check for AI blocking message in stdout
-        # The prompt tells AI: "If you cannot complete the task, describe what is blocking you as the last line of your output"
-        blocked_reason = ""
-        stdout_file = workdir / ".soda-stdout.log"
-        if stdout_file.exists():
-            try:
-                stdout_text = stdout_file.read_text().strip()
-                if stdout_text:
-                    lines = stdout_text.split("\n")
-                    last_line = lines[-1].strip().lower() if lines else ""
-                    block_phrases = [
-                        "i cannot complete", "i am stuck", "i need help",
-                        "i am unable to", "i'm stuck", "i'm blocked",
-                        "cannot complete this", "blocked:",
-                    ]
-                    if any(kw in last_line for kw in block_phrases):
-                        blocked_reason = "\n".join(lines[-5:])
-            except Exception:
-                pass
-
-        if blocked_reason:
-            # AI reported it's blocked
-            async with async_session() as session:
-                task = await session.get(Task, task_id)
-                if task:
-                    task.board_column = "blocked"
-                    session.add(TaskComment(task_id=task_id, author="Soda",
-                        content=f"⚠️ AI reported it's blocked:\n\n{blocked_reason}"))
-                    await session.commit()
-            return
-
-        # Check for execution errors (shell quoting, command not found, etc.)
-        stdout_text = ""
-        stderr_text = ""
-        if stdout_file.exists():
-            try:
-                stdout_text = stdout_file.read_text().strip()
-            except Exception:
-                pass
-        stderr_file = workdir / ".soda-stderr.log"
-        if stderr_file.exists():
-            try:
-                stderr_text = stderr_file.read_text().strip()
-            except Exception:
-                pass
-
-        if not stdout_text:
-            # No AI output at all — indicates execution error
-            error_detail = stderr_text[:2000] if stderr_text else "Unknown error (no output)"
-            async with async_session() as session:
-                task = await session.get(Task, task_id)
-                if task:
-                    task.board_column = "blocked"
-                    session.add(TaskComment(task_id=task_id, author="Soda",
-                        content=f"⚠️ **Execution error:** OpenCode did not produce any output.\n\n```\n{error_detail}\n```"))
-                    await session.commit()
-            return
-
-        # Git commit + push + PR
-        pr_url = await _git_commit_push_and_pr(
-            task_id=task_id,
-            workdir=workdir,
-            auth_repo_url=auth_repo_url,
-            repo_name=repo_name,
-            username=git_username,
-            token=git_token,
-            default_branch=default_branch,
-        )
-
-        # Update task status based on PR result
-        async with async_session() as session:
-            task = await session.get(Task, task_id)
-            if not task:
+        
+        _processing_tasks.add(task_id)
+        
+        try:
+            ctx = _post_process_ctx.pop(task_id, None)
+            if not ctx:
+                logger.warning(f"Task {task_id}: No context found for post-processing")
                 return
-            if pr_url:
-                task.board_column = "review"
-                session.add(TaskComment(task_id=task_id, author="Soda",
-                    content=f"📦 **Pull Request created:** {pr_url}"))
-            elif git_username and git_token:
-                task.board_column = "blocked"
-                session.add(TaskComment(task_id=task_id, author="Soda",
-                    content="⚠️ Failed to create PR"))
-            else:
-                task.board_column = "blocked"
-                session.add(TaskComment(task_id=task_id, author="Soda",
-                    content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."))
-            await session.commit()
+
+            workdir = Path(ctx["workdir"])
+            auth_repo_url = ctx["auth_repo_url"]
+            repo_name = ctx["repo_name"]
+            git_username = ctx["git_username"]
+            git_token = ctx["git_token"]
+            default_branch = ctx["default_branch"]
+
+            # Check for AI blocking message in stdout
+            # The prompt tells AI: "If you cannot complete the task, describe what is blocking you as the last line of your output"
+            blocked_reason = ""
+            stdout_file = workdir / ".soda-stdout.log"
+            if stdout_file.exists():
+                try:
+                    stdout_text = stdout_file.read_text().strip()
+                    if stdout_text:
+                        lines = stdout_text.split("\n")
+                        last_line = lines[-1].strip().lower() if lines else ""
+                        block_phrases = [
+                            "i cannot complete", "i am stuck", "i need help",
+                            "i am unable to", "i'm stuck", "i'm blocked",
+                            "cannot complete this", "blocked:",
+                        ]
+                        if any(kw in last_line for kw in block_phrases):
+                            blocked_reason = "\n".join(lines[-5:])
+                except Exception:
+                    pass
+
+            if blocked_reason:
+                # AI reported it's blocked
+                async with async_session() as session:
+                    task = await session.get(Task, task_id)
+                    if task:
+                        task.board_column = "blocked"
+                        session.add(TaskComment(task_id=task_id, author="Soda",
+                            content=f"⚠️ AI reported it's blocked:\n\n{blocked_reason}"))
+                        await session.commit()
+                return
+
+            # Check for execution errors (shell quoting, command not found, etc.)
+            stdout_text = ""
+            stderr_text = ""
+            if stdout_file.exists():
+                try:
+                    stdout_text = stdout_file.read_text().strip()
+                except Exception:
+                    pass
+            stderr_file = workdir / ".soda-stderr.log"
+            if stderr_file.exists():
+                try:
+                    stderr_text = stderr_file.read_text().strip()
+                except Exception:
+                    pass
+
+            if not stdout_text:
+                # No AI output at all — indicates execution error
+                error_detail = stderr_text[:2000] if stderr_text else "Unknown error (no output)"
+                async with async_session() as session:
+                    task = await session.get(Task, task_id)
+                    if task:
+                        task.board_column = "blocked"
+                        session.add(TaskComment(task_id=task_id, author="Soda",
+                            content=f"⚠️ **Execution error:** OpenCode did not produce any output.\n\n```\n{error_detail}\n```"))
+                        await session.commit()
+                return
+
+            # Git commit + push + PR
+            pr_url = await _git_commit_push_and_pr(
+                task_id=task_id,
+                workdir=workdir,
+                auth_repo_url=auth_repo_url,
+                repo_name=repo_name,
+                username=git_username,
+                token=git_token,
+                default_branch=default_branch,
+            )
+
+            # Update task status based on PR result
+            async with async_session() as session:
+                task = await session.get(Task, task_id)
+                if not task:
+                    return
+                if pr_url:
+                    task.board_column = "review"
+                    session.add(TaskComment(task_id=task_id, author="Soda",
+                        content=f"📦 **Pull Request created:** {pr_url}"))
+                elif git_username and git_token:
+                    task.board_column = "blocked"
+                    session.add(TaskComment(task_id=task_id, author="Soda",
+                        content="⚠️ Failed to create PR"))
+                else:
+                    task.board_column = "blocked"
+                    session.add(TaskComment(task_id=task_id, author="Soda",
+                        content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."))
+                await session.commit()
+        finally:
+            _processing_tasks.discard(task_id)
+            logger.info(f"Task {task_id}: Post-processing completed")
 
 
     async def _git_commit_push_and_pr(
@@ -1679,22 +1691,33 @@ Return ONLY valid JSON, no other text."""
                 if ai_output:
                     session.add(TaskComment(task_id=task.id, author="AI", content=ai_output))
 
-            # Close process file descriptors (don't remove from running_processes — watchdog handles that)
+            # Close process file descriptors
             if payload.taskId in running_processes:
                 proc_info = running_processes[payload.taskId]
                 if isinstance(proc_info, tuple):
+                    proc, stdout_fd, stderr_fd = proc_info
                     try:
-                        proc_info[1].close()
-                        proc_info[2].close()
+                        stdout_fd.close()
+                        stderr_fd.close()
                     except Exception:
                         pass
-                # Don't delete from running_processes — watchdog will detect exit and trigger post-processing
-                # This prevents a race condition where the watchdog finds a "running" task with no process
-
+                    
+                    # Check if process has exited
+                    if proc.returncode is not None:
+                        # Process exited - remove from tracker and trigger post-processing
+                        del running_processes[payload.taskId]
+                        logger.info(f"Task {payload.taskId}: Process exited with code {proc.returncode}, triggering post-processing")
+                        # Trigger post-processing (git/PR/auto-review)
+                        asyncio.create_task(_post_process_task(payload.taskId))
+                    else:
+                        # Process still running - watchdog will handle it
+                        logger.info(f"Task {payload.taskId}: Process still running, watchdog will trigger post-processing")
+                else:
+                    # Legacy format - remove and trigger
+                    del running_processes[payload.taskId]
+                    asyncio.create_task(_post_process_task(payload.taskId))
+            
             await session.commit()
-
-        # Trigger post-processing (git/PR/auto-review)
-        asyncio.create_task(_post_process_task(payload.taskId))
         return {"ok": True}
 
     # ── API: Git Commit & Push ─────────────────────────────────────
@@ -2223,7 +2246,7 @@ tmp/
                                 except Exception:
                                     pass
                             del running_processes[task.id]
-                            # Run post-processing in background
+                            # Run post-processing in background (idempotency guard prevents duplicates)
                             asyncio.create_task(_post_process_task(task.id))
                     
                     await session.commit()
