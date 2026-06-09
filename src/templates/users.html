@@ -18,9 +18,7 @@
         {% endif %}
         <div class="user-actions">
             <button class="btn btn-sm" onclick="showEditUser({{ u.id }})">Edit</button>
-            {% if u.name not in ['Project Owner', 'Task Master', 'Junior Developer', 'Medior Developer', 'Senior Developer'] %}
             <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
-            {% endif %}
         </div>
     </div>
     {% else %}
