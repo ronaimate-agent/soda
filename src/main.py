@@ -369,7 +369,6 @@ def create_app() -> FastAPI:
         threading.Thread(target=_update, daemon=True).start()
 
     async def _git_commit_push_and_pr(
-        self_none,  # not a method, ignore
         task_id: int,
         workdir: Path,
         auth_repo_url: str,
