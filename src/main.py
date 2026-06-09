@@ -278,12 +278,11 @@ def create_app() -> FastAPI:
     _post_process_ctx: dict[int, dict] = {}
 
     async def _post_process_task(task_id: int) -> None:
-        """After AI process completes: git commit/push, create PR, send callback."""
+        """After AI process completes: git commit/push, create PR, update task status."""
         ctx = _post_process_ctx.pop(task_id, None)
         if not ctx:
             return
 
-        callback_url = ctx["callback_url"]
         workdir = Path(ctx["workdir"])
         auth_repo_url = ctx["auth_repo_url"]
         repo_name = ctx["repo_name"]
@@ -292,25 +291,34 @@ def create_app() -> FastAPI:
         default_branch = ctx["default_branch"]
 
         # Check for AI blocking message in stdout
-        blocked = False
-        block_reason = ""
+        # The prompt tells AI: "If you cannot complete the task, describe what is blocking you as the last line of your output"
+        blocked_reason = ""
         stdout_file = workdir / ".soda-stdout.log"
         if stdout_file.exists():
             try:
                 stdout_text = stdout_file.read_text().strip()
                 if stdout_text:
-                    last_lines = "\n".join(stdout_text.split("\n")[-10:])
-                    # Check if AI indicated it's blocked
-                    block_keywords = ["cannot complete", "blocked", "need help", "stuck", "unable to", "missing", "requires"]
-                    if any(kw in last_lines.lower() for kw in block_keywords):
-                        blocked = True
-                        block_reason = last_lines[:500]
+                    lines = stdout_text.split("\n")
+                    last_line = lines[-1].strip().lower() if lines else ""
+                    block_phrases = [
+                        "i cannot complete", "i am stuck", "i need help",
+                        "i am unable to", "i'm stuck", "i'm blocked",
+                        "cannot complete this", "blocked:",
+                    ]
+                    if any(kw in last_line for kw in block_phrases):
+                        blocked_reason = "\n".join(lines[-5:])
             except Exception:
                 pass
 
-        if blocked:
+        if blocked_reason:
             # AI reported it's blocked
-            _send_callback(callback_url, task_id, "blocked", question=block_reason)
+            async with async_session() as session:
+                task = await session.get(Task, task_id)
+                if task:
+                    task.board_column = "blocked"
+                    session.add(TaskComment(task_id=task_id, author="Soda",
+                        content=f"⚠️ AI reported it's blocked:\n\n{blocked_reason}"))
+                    await session.commit()
             return
 
         # Git commit + push + PR
@@ -324,49 +332,25 @@ def create_app() -> FastAPI:
             default_branch=default_branch,
         )
 
-        if pr_url:
-            _send_callback(callback_url, task_id, "review", summary=f"PR: {pr_url}")
-        elif git_username and git_token:
-            # PR creation failed
-            _send_callback(callback_url, task_id, blocked=True, question="Failed to create PR")
-        else:
-            # No git auth
-            _send_callback(callback_url, task_id, "blocked", question="GitHub auth not configured")
+        # Update task status based on PR result
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                return
+            if pr_url:
+                task.board_column = "review"
+                session.add(TaskComment(task_id=task_id, author="Soda",
+                    content=f"📦 **Pull Request created:** {pr_url}"))
+            elif git_username and git_token:
+                task.board_column = "blocked"
+                session.add(TaskComment(task_id=task_id, author="Soda",
+                    content="⚠️ Failed to create PR"))
+            else:
+                task.board_column = "blocked"
+                session.add(TaskComment(task_id=task_id, author="Soda",
+                    content="⚠️ GitHub auth not configured. Set git_username and git_token in Settings to auto-create PRs."))
+            await session.commit()
 
-
-    def _send_callback(callback_url: str, task_id: int, status: str, question: str = None, summary: str = None) -> None:
-        """Update task status directly in DB (no HTTP callback to avoid loops)."""
-        import threading
-        def _update():
-            import asyncio as _asyncio
-            async def _do():
-                try:
-                    async with async_session() as session:
-                        task = await session.get(Task, task_id)
-                        if not task:
-                            return
-                        if status == "review":
-                            task.board_column = "review"
-                        elif status == "blocked":
-                            task.board_column = "blocked"
-                        content = ""
-                        if question:
-                            content = question
-                        elif summary:
-                            content = summary
-                        if content:
-                            session.add(TaskComment(task_id=task_id, author="Soda", content=content))
-                        await session.commit()
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(f"Post-process callback failed for task {task_id}: {e}")
-            try:
-                loop = _asyncio.new_event_loop()
-                loop.run_until_complete(_do())
-                loop.close()
-            except Exception:
-                pass
-        threading.Thread(target=_update, daemon=True).start()
 
     async def _git_commit_push_and_pr(
         task_id: int,
@@ -1648,7 +1632,7 @@ Return ONLY valid JSON, no other text."""
                 if ai_output:
                     session.add(TaskComment(task_id=task.id, author="AI", content=ai_output))
 
-            # Clean up running process
+            # Close process file descriptors (don't remove from running_processes — watchdog handles that)
             if payload.taskId in running_processes:
                 proc_info = running_processes[payload.taskId]
                 if isinstance(proc_info, tuple):
@@ -1657,7 +1641,8 @@ Return ONLY valid JSON, no other text."""
                         proc_info[2].close()
                     except Exception:
                         pass
-                del running_processes[payload.taskId]
+                # Don't delete from running_processes — watchdog will detect exit and trigger post-processing
+                # This prevents a race condition where the watchdog finds a "running" task with no process
 
             await session.commit()
 
