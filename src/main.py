@@ -150,6 +150,20 @@ def create_app() -> FastAPI:
         # Get effective API key based on provider setting
         api_key = await _get_effective_api_key()
 
+        # ── Ensure auth.json has correct provider + key ──
+        provider_setting = await get_setting("ai_provider", "opencode")
+        if api_key and not assignee.api_key:
+            auth_dir = OPENCODE_AUTH.parent
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            auth_data = {}
+            if assignee.model:
+                auth_data["model"] = assignee.model
+            if provider_setting != "opencode":
+                auth_data["provider"] = provider_setting
+            auth_data["apiKey"] = api_key
+            with open(OPENCODE_AUTH, "w") as f:
+                json.dump(auth_data, f)
+
         # Build comments JSON and collect context
         async with async_session() as session:
             result = await session.execute(
@@ -276,22 +290,6 @@ def create_app() -> FastAPI:
         if api_key:
             env["OPENCODE_API_KEY"] = api_key
             env["OPENROUTER_API_KEY"] = api_key
-            # Ensure auth.json has the key if user has no individual key
-            auth_dir = OPENCODE_AUTH.parent
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            if not assignee.api_key:
-                auth_data = {}
-                if assignee.model:
-                    auth_data["model"] = assignee.model
-                    if assignee.model.startswith("openrouter/"):
-                        auth_data["provider"] = "openrouter"
-                if "provider" not in auth_data:
-                    ai_provider = await get_setting("ai_provider", "opencode")
-                    if ai_provider != "opencode":
-                        auth_data["provider"] = ai_provider
-                auth_data["apiKey"] = api_key
-                with open(OPENCODE_AUTH, "w") as f:
-                    json.dump(auth_data, f)
 
         # Run OpenCode
         stdout_file = workdir / ".soda-stdout.log"
@@ -1411,7 +1409,7 @@ If you are ready to generate, return ONLY this JSON:
   "project_name": "...",
   "project_description": "...",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "depends_on": []}}
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
   ]
 }}
 
@@ -1545,7 +1543,7 @@ Now generate the project. Return ONLY this JSON:
   "project_name": "...",
   "project_description": "...",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "depends_on": []}}
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
   ]
 }}
 
