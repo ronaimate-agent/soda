@@ -7,10 +7,25 @@
 <div class="settings-form">
     <form onsubmit="return saveSettings(event)">
 
-        <h3>🤖 OpenCode / CLI Integration</h3>
-        <label>OpenCode API Key</label>
-        <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-... or openrouter key" class="input-mono" autocomplete="off">
-        <p class="help-text">This key is injected as <code>OPENCODE_API_KEY</code> environment variable when running execute commands. Used by OpenCode CLI or any agentic tool that reads this env var.</p>
+        <h3>🤖 AI Provider</h3>
+        <label>Provider</label>
+        <select name="ai_provider" id="ai-provider" onchange="toggleProvider(this.value)" style="margin-bottom:16px">
+            <option value="opencode" {% if settings.get('ai_provider', 'opencode') == 'opencode' %}selected{% endif %}>OpenCode (CLI)</option>
+            <option value="openrouter" {% if settings.get('ai_provider', 'opencode') == 'openrouter' %}selected{% endif %}>OpenRouter (API)</option>
+        </select>
+
+        <div id="opencode-fields">
+            <label>OpenCode API Key</label>
+            <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-... or openrouter key" class="input-mono" autocomplete="off">
+            <p class="help-text">This key is injected as <code>OPENCODE_API_KEY</code> when running execute commands via OpenCode CLI.</p>
+        </div>
+
+        <div id="openrouter-fields" style="display:none">
+            <label>OpenRouter API Key</label>
+            <input type="password" name="openrouter_api_key" value="{{ settings.get('openrouter_api_key', '') }}" placeholder="sk-or-v1-..." class="input-mono" autocomplete="off">
+            <p class="help-text">Used to fetch model list and run AI agents via OpenRouter API.</p>
+            <p class="help-text">Get your key at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
+        </div>
 
         <h3>📡 Callback</h3>
         <label>Callback URL</label>
@@ -38,28 +53,18 @@
         <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
         <p class="help-text">Default branch name for new repositories.</p>
 
-        <h3>📋 Task Lifecycle</h3>
-        <div class="lifecycle-diagram">
-            <div class="lifecycle-step">💡 Idea</div>
-            <div class="lifecycle-arrow">→</div>
-            <div class="lifecycle-step">📋 Backlog</div>
-            <div class="lifecycle-arrow">→</div>
-            <div class="lifecycle-step">▶️ Running</div>
-            <div class="lifecycle-arrow">⇄</div>
-            <div class="lifecycle-step lifecycle-pause">🚫 Blocked</div>
-            <div class="lifecycle-arrow">→</div>
-            <div class="lifecycle-step">👁️ Review</div>
-            <div class="lifecycle-arrow">→</div>
-            <div class="lifecycle-step">✅ Done</div>
-        </div>
-        <p class="help-text">Drag tasks between columns. Moving to Running triggers the assignee AI's execute command.</p>
-
         <button type="submit" class="btn btn-primary" style="margin-top:24px">Save Settings</button>
         <span id="save-indicator" style="display:none; margin-left:12px; color:var(--green)">✓ Saved</span>
     </form>
 </div>
 
 <script>
+function toggleProvider(val) {
+    document.getElementById('opencode-fields').style.display = val === 'opencode' ? 'block' : 'none';
+    document.getElementById('openrouter-fields').style.display = val === 'openrouter' ? 'block' : 'none';
+}
+toggleProvider(document.getElementById('ai-provider').value);
+
 async function saveSettings(e) {
     e.preventDefault();
     const fd = new FormData(e.target);

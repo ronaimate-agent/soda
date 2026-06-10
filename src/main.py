@@ -86,7 +86,7 @@ def create_app() -> FastAPI:
 
     def _write_opencode_auth(user: User) -> None:
         """Write AI user's API key and model to OpenCode auth.json.
-        Falls back to global OpenCode API key if user has no key set."""
+        Falls back to global API key based on ai_provider setting."""
         auth_dir = OPENCODE_AUTH.parent
         auth_dir.mkdir(parents=True, exist_ok=True)
         auth_data = {}
@@ -94,6 +94,10 @@ def create_app() -> FastAPI:
             auth_data["apiKey"] = user.api_key
         if user.provider:
             auth_data["provider"] = user.provider
+        else:
+            # Infer provider from user model or global setting
+            if user.model and user.model.startswith("openrouter/"):
+                auth_data["provider"] = "openrouter"
         if user.model:
             auth_data["model"] = user.model
         # If user has no API key, don't overwrite auth.json — let the
@@ -103,7 +107,7 @@ def create_app() -> FastAPI:
         with open(OPENCODE_AUTH, "w") as f:
             json.dump(auth_data, f)
 
-    # ── Helper: get OpenCode API key from settings ─────────────────
+    # ── Helpers: get API key from settings ─────────────────
 
     async def _get_opencode_api_key() -> str:
         """Get OpenCode API key from global settings."""
@@ -113,6 +117,22 @@ def create_app() -> FastAPI:
             )
             setting = result.scalar_one_or_none()
             return (setting.value or "").strip() if setting else ""
+
+    async def _get_openrouter_api_key() -> str:
+        """Get OpenRouter API key from global settings."""
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(GlobalSetting).where(GlobalSetting.key == "openrouter_api_key")
+            )
+            setting = result.scalar_one_or_none()
+            return (setting.value or "").strip() if setting else ""
+
+    async def _get_effective_api_key() -> str:
+        """Get the API key for the currently configured provider."""
+        provider = await get_setting("ai_provider", "opencode")
+        if provider == "openrouter":
+            return await _get_openrouter_api_key()
+        return await _get_opencode_api_key()
 
     # ── Helper: run execute command ─────────────────────────────────
 
@@ -126,8 +146,8 @@ def create_app() -> FastAPI:
         # Write AI user's auth to OpenCode config
         _write_opencode_auth(assignee)
 
-        # Get OpenCode API key from settings
-        opencode_api_key = await _get_opencode_api_key()
+        # Get effective API key based on provider setting
+        api_key = await _get_effective_api_key()
 
         # Build comments JSON and collect context
         async with async_session() as session:
@@ -252,8 +272,9 @@ def create_app() -> FastAPI:
 
         # Build env
         env = os.environ.copy()
-        if opencode_api_key:
-            env["OPENCODE_API_KEY"] = opencode_api_key
+        if api_key:
+            env["OPENCODE_API_KEY"] = api_key
+            env["OPENROUTER_API_KEY"] = api_key
 
         # Run OpenCode
         stdout_file = workdir / ".soda-stdout.log"
@@ -1065,10 +1086,11 @@ def create_app() -> FastAPI:
         logger = logging.getLogger(__name__)
         
         _write_opencode_auth(architect)
-        opencode_api_key = await _get_opencode_api_key()
+        api_key = await _get_effective_api_key()
         env = os.environ.copy()
-        if opencode_api_key:
-            env["OPENCODE_API_KEY"] = opencode_api_key
+        if api_key:
+            env["OPENCODE_API_KEY"] = api_key
+            env["OPENROUTER_API_KEY"] = api_key
 
         logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
         
@@ -1656,49 +1678,78 @@ Return ONLY valid JSON, no other text."""
 
     @app.get("/api/models")
     async def list_models():
-        """List available AI models from OpenCode"""
+        """List available AI models from configured provider (OpenCode or OpenRouter)"""
         try:
-            # Write global OpenCode API key to auth.json so the CLI can authenticate
-            opencode_api_key = await _get_opencode_api_key()
-            auth_dir = OPENCODE_AUTH.parent
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            auth_data = {}
-            if opencode_api_key:
-                auth_data["apiKey"] = opencode_api_key
-            with open(OPENCODE_AUTH, "w") as f:
-                json.dump(auth_data, f)
+            # Get provider setting
+            provider = await get_setting("ai_provider", "opencode")
+            opencode_api_key = await get_setting("opencode_api_key", "")
+            openrouter_api_key = await get_setting("openrouter_api_key", "")
 
-            # Build env with API key
-            env = os.environ.copy()
-            if opencode_api_key:
-                env["OPENCODE_API_KEY"] = opencode_api_key
-
-            proc = await asyncio.create_subprocess_shell(
-                "opencode models",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            stdout, stderr = await proc.communicate()
-            
-            if proc.returncode != 0:
-                return []
-            
-            output = stdout.decode().strip()
-            if not output:
-                return []
-            
-            # OpenCode returns plain text, one model per line
-            models = []
-            for line in output.split("\n"):
-                line = line.strip()
-                if line:
-                    models.append({"id": line})
-            return models
-            
+            if provider == "openrouter":
+                return await _fetch_openrouter_models(openrouter_api_key)
+            else:
+                return await _fetch_opencode_models(opencode_api_key)
         except Exception as e:
-            print(f"Error fetching models: {e}")
+            logger.error(f"Error fetching models: {e}")
             return []
+
+    async def _fetch_openrouter_models(api_key: str) -> list[dict]:
+        """Fetch models from OpenRouter API."""
+        if not api_key:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                if resp.status_code != 200:
+                    logger.error(f"OpenRouter API error: {resp.status_code}")
+                    return []
+                data = resp.json()
+                models = []
+                for m in data.get("data", []):
+                    models.append({"id": m["id"], "name": m.get("name", m["id"])})
+                return models
+        except Exception as e:
+            logger.error(f"OpenRouter fetch error: {e}")
+            return []
+
+    async def _fetch_opencode_models(api_key: str) -> list[dict]:
+        """Fetch models from OpenCode CLI."""
+        auth_dir = OPENCODE_AUTH.parent
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        auth_data = {}
+        if api_key:
+            auth_data["apiKey"] = api_key
+        with open(OPENCODE_AUTH, "w") as f:
+            json.dump(auth_data, f)
+
+        env = os.environ.copy()
+        if api_key:
+            env["OPENCODE_API_KEY"] = api_key
+
+        proc = await asyncio.create_subprocess_shell(
+            "opencode models",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            return []
+
+        output = stdout.decode().strip()
+        if not output:
+            return []
+
+        models = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if line:
+                models.append({"id": line, "name": line})
+        return models
 
     # ── API: Callback ──────────────────────────────────────────────
 
