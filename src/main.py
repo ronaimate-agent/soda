@@ -21,7 +21,7 @@ from .database import (
     GlobalSetting, Idea, Project, Task, TaskComment, TaskDependency, User,
     TaskGitState, async_session, init_db, sa_select,
 )
-from .utils import get_setting, get_opencode_api_key, write_opencode_auth
+from .utils import get_setting, get_opencode_api_key, write_opencode_auth, get_or_404
 from .github_service import GitHubService
 from .models import CallbackPayload, TaskMovePayload, CommentPayload
 
@@ -705,9 +705,7 @@ def create_app() -> FastAPI:
     @app.get("/api/tasks/{task_id}")
     async def get_task(task_id: int):
         async with async_session() as session:
-            task = await session.get(Task, task_id)
-            if not task:
-                raise HTTPException(404)
+            task = await get_or_404(session, Task, task_id)
             result = await session.execute(
                 sa_select(TaskComment).where(TaskComment.task_id == task_id).order_by(TaskComment.created_at)
             )

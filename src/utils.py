@@ -4,7 +4,19 @@ Utility functions and helpers for Soda application.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, TypeVar
+from fastapi import HTTPException
+
+T = TypeVar("T")
+
+
+async def get_or_404(session: Any, model: type[T], id: Any, entity_name: Optional[str] = None) -> T:
+    """Get entity by ID or raise 404 if not found."""
+    entity = await session.get(model, id)
+    if not entity:
+        name = entity_name or model.__name__
+        raise HTTPException(404, f"{name} not found")
+    return entity
 
 from sqlalchemy import select as sa_select
 
