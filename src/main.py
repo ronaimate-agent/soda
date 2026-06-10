@@ -1474,13 +1474,13 @@ Return ONLY valid JSON, no other text."""
                     repo_name=repo_name,
                     repo_private=repo_private,
                 )
-            except HTTPException as e:
-                logger.error(f"Project creation failed for idea {idea_id}: {e}")
+            except Exception as e:
+                logger.error(f"Project creation failed for idea {idea_id}: {type(e).__name__}: {e}")
                 async with async_session() as session:
                     idea_obj = await session.get(Idea, idea_id)
                     if idea_obj:
                         idea_obj.status = "error"
-                        idea_obj.pending_questions = json.dumps({"error": str(e.detail)})
+                        idea_obj.pending_questions = json.dumps({"error": str(e)})
                         await session.commit()
             return
 
@@ -2074,7 +2074,7 @@ Return ONLY valid JSON, no other text."""
         if result["success"]:
             # Commit .gitignore to the newly created repo
             await gh_service.commit_gitignore(repo_name)
-            return {"status": "created", "data": result["repo_data"]}
+            return {"status": "created", "data": result["data"]}
         else:
             return {"status": "error", "message": result["error"]}
 
