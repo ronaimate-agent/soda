@@ -1079,12 +1079,12 @@ def create_app() -> FastAPI:
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            logger.error(f"Architect timed out after 600s")
-            raise HTTPException(504, "Architect AI timed out. Try again with a shorter prompt.")
+            logger.error(f"Architect timed out after 120s")
+            raise HTTPException(504, "Architect AI timed out after 120s. The prompt may be too complex or the AI service is slow. Try again or use a shorter description.")
         output = stdout.decode().strip()
         error_output = stderr.decode().strip()
         
@@ -1320,11 +1320,16 @@ Return ONLY valid JSON, no other text."""
 
         try:
             result = await _call_architect(architect, prompt)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Architect call failed for idea {idea_id}: {type(e).__name__}: {e}")
             async with async_session() as session:
                 idea_obj = await session.get(Idea, idea_id)
-                idea_obj.status = "active"
-                await session.commit()
+                if idea_obj:
+                    idea_obj.status = "active"
+                    await session.commit()
+                    logger.info(f"Idea {idea_id} status reset to active after architect failure")
+                else:
+                    logger.error(f"Idea {idea_id} not found when trying to reset status!")
             raise
 
         if result.get("type") == "questions":
@@ -1337,13 +1342,22 @@ Return ONLY valid JSON, no other text."""
             return {"status": "questions", "questions": questions, "idea_id": idea_id}
 
         if result.get("type") == "generate":
-            async with async_session() as session:
-                idea = await session.get(Idea, idea_id)
-            return await _create_project_from_result(
-                idea, result,
-                repo_name=repo_name,
-                repo_private=repo_private == "true",
-            )
+            try:
+                async with async_session() as session:
+                    idea = await session.get(Idea, idea_id)
+                return await _create_project_from_result(
+                    idea, result,
+                    repo_name=repo_name,
+                    repo_private=repo_private == "true",
+                )
+            except HTTPException:
+                # Project creation failed (e.g. GitHub repo error) — reset idea status
+                async with async_session() as session:
+                    idea_obj = await session.get(Idea, idea_id)
+                    if idea_obj:
+                        idea_obj.status = "active"
+                        await session.commit()
+                raise
 
         async with async_session() as session:
             idea_obj = await session.get(Idea, idea_id)
@@ -1423,11 +1437,16 @@ Return ONLY valid JSON, no other text."""
 
         try:
             result = await _call_architect(architect, prompt)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Architect call failed for idea {idea_id}: {type(e).__name__}: {e}")
             async with async_session() as session:
                 idea_obj = await session.get(Idea, idea_id)
-                idea_obj.status = "active"
-                await session.commit()
+                if idea_obj:
+                    idea_obj.status = "active"
+                    await session.commit()
+                    logger.info(f"Idea {idea_id} status reset to active after architect failure")
+                else:
+                    logger.error(f"Idea {idea_id} not found when trying to reset status!")
             raise
 
         if result.get("type") == "questions":
@@ -1440,9 +1459,17 @@ Return ONLY valid JSON, no other text."""
             return {"status": "questions", "questions": questions, "idea_id": idea_id}
 
         if result.get("type") == "generate":
-            async with async_session() as session:
-                idea = await session.get(Idea, idea_id)
-            return await _create_project_from_result(idea, result)
+            try:
+                async with async_session() as session:
+                    idea = await session.get(Idea, idea_id)
+                return await _create_project_from_result(idea, result)
+            except HTTPException:
+                async with async_session() as session:
+                    idea_obj = await session.get(Idea, idea_id)
+                    if idea_obj:
+                        idea_obj.status = "active"
+                        await session.commit()
+                raise
 
         async with async_session() as session:
             idea_obj = await session.get(Idea, idea_id)

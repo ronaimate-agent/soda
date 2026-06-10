@@ -65,6 +65,19 @@
                 </div>
                 <p class="help-text" id="model-help">Click "Load" to fetch available models from OpenCode</p>
             </div>
+            <div id="size-fields" style="display:none">
+                <label>Póla méretek</label>
+                <p class="help-text" style="margin-bottom:8px">Válaszd ki, melyik méreteket kezeli ez az user. Ugyanazt a méretet csak egy userhez lehet rendelni.</p>
+                <div id="create-sizes-conflict-info" style="display:none; background:#ff525222; border:1px solid #ff5252; padding:8px 12px; border-radius:4px; margin-bottom:8px; font-size:0.85em;"></div>
+                <div class="size-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px;">
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XS" id="create-size-XS"> <span class="badge complexity-xs">XS</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="S" id="create-size-S"> <span class="badge complexity-s">S</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="M" id="create-size-M"> <span class="badge complexity-m">M</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="L" id="create-size-L"> <span class="badge complexity-l">L</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XL" id="create-size-XL"> <span class="badge complexity-xl">XL</span></label>
+                </div>
+                <div id="create-sizes-assignments" style="font-size:0.85em; color:var(--text2);"></div>
+            </div>
             <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
         </form>
     </div>
@@ -121,6 +134,10 @@ async function fetchModels() {
 
 function toggleAI(type) {
     document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
+    document.getElementById('size-fields').style.display = type === 'ai' ? 'block' : 'none';
+    if (type === 'ai') {
+        loadCreateSizesAssignments();
+    }
 }
 
 function showCreateUser() {
@@ -129,6 +146,13 @@ function showCreateUser() {
     document.getElementById('user-form').reset();
     document.getElementById('user-modal').style.display = 'flex';
     toggleAI('human');
+    // Reset size checkboxes
+    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+        const cb = document.getElementById(`create-size-${size}`);
+        if (cb) cb.checked = false;
+    }
+    document.getElementById('create-sizes-assignments').innerHTML = '';
+    document.getElementById('create-sizes-conflict-info').style.display = 'none';
 }
 
 async function showEditUser(userId) {
@@ -173,12 +197,34 @@ async function saveUser(e) {
     const method = userId ? 'PATCH' : 'POST';
 
     const res = await fetch(url, { method, body: fd });
-    if (res.ok) { closeModal('user-modal'); window.location.reload(); }
-    else {
+    if (res.ok) {
+        // If creating new user, also save default sizes
+        if (!userId) {
+            const newUser = await res.json();
+            await saveDefaultSizesForNewUser(newUser.id);
+        }
+        closeModal('user-modal');
+        window.location.reload();
+    } else {
         const err = await res.json();
         alert('Error: ' + (err.detail || JSON.stringify(err)));
     }
     return false;
+}
+
+async function saveDefaultSizesForNewUser(userId) {
+    const sizes = [];
+    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+        const cb = document.getElementById(`create-size-${size}`);
+        if (cb && cb.checked) sizes.push(size);
+    }
+    if (sizes.length > 0) {
+        await fetch(`/api/users/${userId}/default-sizes`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({sizes})
+        });
+    }
 }
 
 async function deleteUser(userId) {
@@ -191,9 +237,43 @@ function closeModal(id) {
     document.getElementById(id).style.display = 'none';
 }
 
-// ── Default Sizes ─────────────────────────────────────
+// ── Create modal sizes ───────────────────────────────
 
-let sizesAssignments = {};
+async function loadCreateSizesAssignments() {
+    try {
+        const res = await fetch('/api/sizes');
+        const data = await res.json();
+        const assignments = data.assignments || {};
+        const conflictDiv = document.getElementById('create-sizes-conflict-info');
+        const assignmentsDiv = document.getElementById('create-sizes-assignments');
+        
+        let info = [];
+        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+            const checkbox = document.getElementById(`create-size-${size}`);
+            const assignment = assignments[size];
+            if (assignment) {
+                if (checkbox) {
+                    checkbox.disabled = true;
+                    checkbox.parentElement.style.opacity = '0.5';
+                }
+                info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
+            } else {
+                if (checkbox) {
+                    checkbox.disabled = false;
+                    checkbox.parentElement.style.opacity = '1';
+                }
+            }
+        }
+        
+        if (info.length > 0) {
+            assignmentsDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
+        } else {
+            assignmentsDiv.innerHTML = '';
+        }
+    } catch (e) {
+        console.error('Failed to load sizes for create modal:', e);
+    }
+}
 
 async function loadSizesAssignments() {
     try {

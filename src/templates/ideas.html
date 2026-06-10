@@ -225,7 +225,11 @@ async function generateProject() {
             data = await res.json();
         } else {
             const text = await res.text();
-            throw new Error(`Server error (${res.status}): ${text.substring(0, 200)}`);
+            // Proxy timeout or server error - show helpful message
+            if (res.status === 504) {
+                throw new Error('The architect AI timed out. This usually means:\n\n• The AI service is slow or overloaded\n• The prompt is too complex\n• Network connectivity issues\n\nPlease try again. If the problem persists, try with a shorter description.');
+            }
+            throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
         
         overlay.style.display = 'none';
@@ -276,7 +280,10 @@ async function submitAnswers(ideaId) {
             data = await res.json();
         } else {
             const text = await res.text();
-            throw new Error(`Server error (${res.status}): ${text.substring(0, 200)}`);
+            if (res.status === 504) {
+                throw new Error('The architect AI timed out while processing your answers. Please try again.');
+            }
+            throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
         
         overlay.style.display = 'none';
