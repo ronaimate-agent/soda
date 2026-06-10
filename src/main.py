@@ -23,6 +23,7 @@ from .database import (
 )
 from .utils import get_setting, get_opencode_api_key, write_opencode_auth
 from .github_service import GitHubService
+from .models import CallbackPayload, TaskMovePayload, CommentPayload
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -49,24 +50,6 @@ logging.basicConfig(
 logger = logging.getLogger("soda")
 git_logger = logging.getLogger("soda.git")
 watchdog_logger = logging.getLogger("soda.watchdog")
-
-
-# ─── Pydantic models ────────────────────────────────────────────────
-
-class CallbackPayload(BaseModel):
-    taskId: int
-    status: str  # "blocked" | "review"
-    question: Optional[str] = None
-    summary: Optional[str] = None
-
-
-class TaskMovePayload(BaseModel):
-    column: str
-
-
-class CommentPayload(BaseModel):
-    content: str
-    author: str = "user"
 
 
 # ─── App factory ────────────────────────────────────────────────────
