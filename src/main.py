@@ -1098,37 +1098,87 @@ def create_app() -> FastAPI:
             return {"ok": True}
 
     async def _call_architect(architect: "User", prompt: str) -> dict:
-        """Call the architect AI via OpenCode and return parsed JSON result."""
+        """Call the architect AI and return parsed JSON result.
+        Uses OpenRouter API directly when OpenRouter provider is configured,
+        otherwise uses OpenCode CLI."""
+        import logging
+        import httpx as _httpx
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
+
+        p = await get_setting("ai_provider", "opencode")
+
+        if p == "openrouter":
+            return await _call_openrouter_architect(architect, prompt)
+        else:
+            return await _call_opencode_architect(architect, prompt)
+
+    async def _call_openrouter_architect(architect: "User", prompt: str) -> dict:
+        """Call architect via direct OpenRouter API call (no OpenCode agent/tools)."""
+        api_key = await _get_openrouter_api_key()
+        if not api_key:
+            raise HTTPException(400, "OpenRouter API key not configured in Settings")
+
+        model = architect.model or "openrouter/auto"
+        # Ensure model has openrouter/ prefix if not already
+        model_str = f"openrouter/{model}" if "/" not in model else model
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://soda.local",
+                },
+                json={
+                    "model": model_str,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert software architect. You output ONLY valid JSON, no other text."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                },
+            )
+
+            if resp.status_code != 200:
+                err_detail = resp.text[:500]
+                logger.error(f"OpenRouter API error ({resp.status_code}): {err_detail}")
+                raise HTTPException(500, f"Architect API error ({resp.status_code}): {err_detail}")
+
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            if not content:
+                raise HTTPException(500, "Architect returned empty response from OpenRouter")
+
+        output = content.strip()
+        json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', output)
+        if not json_match:
+            logger.error(f"No JSON found in architect output: {output[:500]}")
+            raise HTTPException(500, f"Architect did not return valid JSON. Output: {output[:200]}")
+        try:
+            result = json.loads(json_match.group())
+            logger.info(f"Successfully parsed architect response: {result.get('type')}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse architect JSON: {str(e)}, Output: {output[:500]}")
+            raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
+
+    async def _call_opencode_architect(architect: "User", prompt: str) -> dict:
+        """Call architect via OpenCode CLI (for OpenCode provider)."""
         import logging
         logger = logging.getLogger(__name__)
-        
+
         _write_opencode_auth(architect)
-        api_key = await _get_effective_api_key()
+        api_key = await _get_opencode_api_key()
         env = os.environ.copy()
         if api_key:
             env["OPENCODE_API_KEY"] = api_key
-            env["OPENROUTER_API_KEY"] = api_key
-            # Ensure auth.json always has the key, even if user has no individual key
-            auth_dir = OPENCODE_AUTH.parent
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            if not architect.api_key:
-                # User has no individual key — write global key to auth.json
-                auth_data = {}
-                if architect.model:
-                    auth_data["model"] = architect.model
-                    if architect.model.startswith("openrouter/"):
-                        auth_data["provider"] = "openrouter"
-                # Use global ai_provider setting if model doesn't specify provider
-                if "provider" not in auth_data:
-                    ai_provider = await get_setting("ai_provider", "opencode")
-                    if ai_provider != "opencode":
-                        auth_data["provider"] = ai_provider
-                auth_data["apiKey"] = api_key
-                with open(OPENCODE_AUTH, "w") as f:
-                    json.dump(auth_data, f)
 
-        logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
-        
+        logger.info(f"Calling architect {architect.name} via OpenCode with prompt length: {len(prompt)}")
+
         proc = await asyncio.create_subprocess_shell(
             f'opencode run --pure {json.dumps(prompt)}',
             stdout=asyncio.subprocess.PIPE,
@@ -1141,19 +1191,19 @@ def create_app() -> FastAPI:
             proc.kill()
             await proc.wait()
             logger.error(f"Architect timed out after 60s")
-            raise HTTPException(504, "Architect AI timed out after 60s. The prompt may be too complex or the AI service is slow. Try again or use a shorter description.")
+            raise HTTPException(504, "Architect AI timed out after 60s. Try again or use a shorter prompt.")
         output = stdout.decode().strip()
         error_output = stderr.decode().strip()
-        
+
         logger.info(f"Architect stdout length: {len(output)}")
         logger.info(f"Architect stderr length: {len(error_output)}")
         if error_output:
             logger.error(f"Architect stderr: {error_output}")
-        
+
         if proc.returncode != 0:
             logger.error(f"Architect process failed with code {proc.returncode}")
             raise HTTPException(500, f"Architect process failed (code {proc.returncode}): {error_output[:500]}")
-        
+
         json_match = re.search(r'\{[\s\S]*\}', output)
         if not json_match:
             logger.error(f"No JSON found in architect output: {output[:500]}")
