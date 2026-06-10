@@ -22,6 +22,7 @@ from .database import (
     TaskGitState, async_session, init_db, sa_select,
 )
 from .utils import get_setting, get_opencode_api_key, write_opencode_auth
+from .github_service import GitHubService
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -422,26 +423,31 @@ def create_app() -> FastAPI:
         default_branch: str,
     ) -> Optional[str]:
         """Commit task workdir changes, push feature branch, create PR. Returns PR URL or None."""
-        import logging
-        logger = logging.getLogger(__name__)
         if not username or not token or not auth_repo_url:
             return None
+        
         try:
             feature_branch = f"task-{task_id}"
             repo_workdir = Path(f"/tmp/soda-pr-workdirs/task-{task_id}")
             repo_workdir.parent.mkdir(parents=True, exist_ok=True)
-            # Remove old
+            
+            # Remove old and clone
             import shutil
             if repo_workdir.exists():
                 shutil.rmtree(repo_workdir)
-            # Clone
+            
             repo = git.Repo.clone_from(auth_repo_url, repo_workdir)
+            
+            # Checkout default branch
             try:
                 repo.git.checkout(default_branch)
             except Exception:
                 repo.git.checkout("-b", default_branch)
+            
+            # Create feature branch
             repo.git.checkout("-b", feature_branch)
-            # Copy workdir contents
+            
+            # Copy workdir contents (exclude .soda- files)
             for item in workdir.iterdir():
                 if item.name.startswith(".soda-"):
                     continue
@@ -452,31 +458,30 @@ def create_app() -> FastAPI:
                     shutil.copytree(item, dest)
                 else:
                     shutil.copy2(item, dest)
+            
             # Commit + push
             repo.git.add(A=True)
             if repo.is_dirty() or repo.untracked_files:
                 repo.index.commit(f"feat: task {task_id}")
                 repo.git.push("origin", feature_branch)
-                # Create PR via API
-                pr_data = {
-                    "title": f"Task {task_id}",
-                    "head": feature_branch,
-                    "base": default_branch,
-                    "body": f"Task {task_id} — created by Soda",
-                }
-                async with httpx.AsyncClient() as client:
-                    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-                    resp = await client.post(
-                        f"https://api.github.com/repos/{username}/{repo_name}/pulls",
-                        headers=headers, json=pr_data,
-                    )
-                    if resp.status_code in [200, 201]:
-                        pr_url = resp.json().get("html_url", "")
-                        logger.info(f"PR created: {pr_url}")
-                        return pr_url
-                    else:
-                        logger.error(f"PR failed: {resp.text}")
-                        return None
+                
+                # Create PR using GitHubService
+                gh_service = GitHubService(username, token)
+                pr_result = await gh_service.create_pull_request(
+                    repo_name=repo_name,
+                    title=f"Task {task_id}",
+                    head=feature_branch,
+                    base=default_branch,
+                    body=f"Task {task_id} — created by Soda"
+                )
+                
+                if pr_result["success"]:
+                    logger.info(f"PR created: {pr_result['pr_url']}")
+                    return pr_result["pr_url"]
+                else:
+                    logger.error(f"PR failed: {pr_result['error']}")
+                    return None
+            
             return None
         except Exception as e:
             logger.error(f"git/pr error for task {task_id}: {e}")
