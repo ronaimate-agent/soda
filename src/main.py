@@ -1079,7 +1079,7 @@ def create_app() -> FastAPI:
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -1252,6 +1252,7 @@ def create_app() -> FastAPI:
         repo_private: str = Form("true"),
     ):
         """Start generating a project from an idea using the architect AI.
+        Returns immediately with status=generating. Frontend should poll for status.
         repo_name: optional custom repo name (sanitized from project name if not provided)
         repo_private: 'true' or 'false' (default: true)"""
         async with async_session() as session:
@@ -1262,7 +1263,6 @@ def create_app() -> FastAPI:
             # Use provided architect_user_id, fall back to idea's architect, then Task Master
             arch_id = architect_user_id or idea.architect_user_id
             if not arch_id:
-                # Auto-select Task Master
                 task_master = await session.execute(
                     sa_select(User).where(User.name == "Task Master")
                 )
@@ -1277,16 +1277,15 @@ def create_app() -> FastAPI:
             if not architect or architect.type != "ai":
                 raise HTTPException(400, "Architect must be an AI user")
             
-            # Save the architect to the idea for future reference
             idea.architect_user_id = arch_id
             idea.status = "generating"
             await session.commit()
 
-        sys_prompt = architect.system_prompt or ""
-        if idea.system_prompt:
-            sys_prompt += "\n\n" + idea.system_prompt
+            sys_prompt = architect.system_prompt or ""
+            if idea.system_prompt:
+                sys_prompt += "\n\n" + idea.system_prompt
 
-        prompt = f"""You are an Architect AI. Generate a project plan from this idea.
+            prompt = f"""You are an Architect AI. Generate a project plan from this idea.
 
 Title: {idea.title}
 Description: {idea.description}
@@ -1318,6 +1317,26 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 
 Return ONLY valid JSON, no other text."""
 
+        # Start background task for architect call + project creation
+        asyncio.create_task(_generate_project_background(
+            idea_id=idea_id,
+            architect=architect,
+            prompt=prompt,
+            repo_name=repo_name,
+            repo_private=repo_private == "true",
+        ))
+
+        return {"status": "generating", "idea_id": idea_id}
+
+    async def _generate_project_background(
+        self_none: Any,
+        idea_id: int,
+        architect: User,
+        prompt: str,
+        repo_name: Optional[str] = None,
+        repo_private: bool = True,
+    ):
+        """Background task: call architect, create project, handle errors."""
         try:
             result = await _call_architect(architect, prompt)
         except Exception as e:
@@ -1325,45 +1344,47 @@ Return ONLY valid JSON, no other text."""
             async with async_session() as session:
                 idea_obj = await session.get(Idea, idea_id)
                 if idea_obj:
-                    idea_obj.status = "active"
+                    idea_obj.status = "error"
+                    idea_obj.pending_questions = json.dumps({"error": str(e)})
                     await session.commit()
-                    logger.info(f"Idea {idea_id} status reset to active after architect failure")
-                else:
-                    logger.error(f"Idea {idea_id} not found when trying to reset status!")
-            raise
+            return
 
         if result.get("type") == "questions":
             questions = result.get("questions", [])
             async with async_session() as session:
                 idea_obj = await session.get(Idea, idea_id)
-                idea_obj.status = "active"
-                idea_obj.pending_questions = json.dumps(questions)
-                await session.commit()
-            return {"status": "questions", "questions": questions, "idea_id": idea_id}
+                if idea_obj:
+                    idea_obj.status = "active"
+                    idea_obj.pending_questions = json.dumps(questions)
+                    await session.commit()
+            return
 
         if result.get("type") == "generate":
             try:
                 async with async_session() as session:
                     idea = await session.get(Idea, idea_id)
-                return await _create_project_from_result(
+                await _create_project_from_result(
                     idea, result,
                     repo_name=repo_name,
-                    repo_private=repo_private == "true",
+                    repo_private=repo_private,
                 )
-            except HTTPException:
-                # Project creation failed (e.g. GitHub repo error) — reset idea status
+            except HTTPException as e:
+                logger.error(f"Project creation failed for idea {idea_id}: {e}")
                 async with async_session() as session:
                     idea_obj = await session.get(Idea, idea_id)
                     if idea_obj:
-                        idea_obj.status = "active"
+                        idea_obj.status = "error"
+                        idea_obj.pending_questions = json.dumps({"error": str(e.detail)})
                         await session.commit()
-                raise
+            return
 
+        # Unexpected response type
         async with async_session() as session:
             idea_obj = await session.get(Idea, idea_id)
-            idea_obj.status = "active"
-            await session.commit()
-        raise HTTPException(500, "Unexpected architect response type")
+            if idea_obj:
+                idea_obj.status = "error"
+                idea_obj.pending_questions = json.dumps({"error": "Unexpected architect response type"})
+                await session.commit()
 
     @app.post("/api/ideas/{idea_id}/answer")
     async def answer_idea_questions(idea_id: int, answers: str = Form(...)):

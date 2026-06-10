@@ -209,7 +209,7 @@ async function generateProject() {
     
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
-    document.getElementById('generate-status-text').textContent = 'Creating GitHub repo and generating tasks...';
+    document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
 
     try {
         const fd = new FormData();
@@ -225,16 +225,40 @@ async function generateProject() {
             data = await res.json();
         } else {
             const text = await res.text();
-            // Proxy timeout or server error - show helpful message
             if (res.status === 504) {
-                throw new Error('The architect AI timed out. This usually means:\n\n• The AI service is slow or overloaded\n• The prompt is too complex\n• Network connectivity issues\n\nPlease try again. If the problem persists, try with a shorter description.');
+                throw new Error('Server timeout. Please try again.');
             }
             throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
         
-        overlay.style.display = 'none';
-
-        if (data.status === 'generated') {
+        if (data.status === 'generating') {
+            // Background task started – poll for result
+            const result = await pollIdeaStatus(ideaId);
+            overlay.style.display = 'none';
+            
+            if (result === 'generated') {
+                // Reload to get fresh data, then redirect
+                window.location.reload();
+            } else if (result === 'questions') {
+                window.location.reload();
+            } else if (result === 'error') {
+                // Fetch error details
+                const ideaRes = await fetch(`/api/ideas`);
+                const ideas = await ideaRes.json();
+                const idea = ideas.find(i => i.id === parseInt(ideaId));
+                let errorMsg = 'Generation failed.';
+                if (idea && idea.questions) {
+                    try {
+                        const q = JSON.parse(idea.questions);
+                        if (q.error) errorMsg = 'Error: ' + q.error;
+                    } catch(e) {}
+                }
+                alert(errorMsg);
+            } else {
+                alert('Generation timed out. Please try again.');
+            }
+        } else if (data.status === 'generated') {
+            overlay.style.display = 'none';
             let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
             if (data.repo_url) {
                 msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
@@ -242,16 +266,64 @@ async function generateProject() {
             alert(msg);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
+            overlay.style.display = 'none';
             window.location.reload();
         } else if (data.detail) {
+            overlay.style.display = 'none';
             alert('Error: ' + data.detail);
         } else {
+            overlay.style.display = 'none';
             alert('Generation failed. Check the architect configuration.');
         }
     } catch (err) {
         overlay.style.display = 'none';
         alert('Error: ' + err.message);
     }
+}
+
+async function pollIdeaStatus(ideaId, maxAttempts = 60) {
+    const overlay = document.getElementById('generate-overlay');
+    const statusText = document.getElementById('generate-status-text');
+    
+    for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, 3000)); // Poll every 3 seconds
+        
+        try {
+            const res = await fetch(`/api/ideas`);
+            const ideas = await res.json();
+            const idea = ideas.find(i => i.id === parseInt(ideaId));
+            
+            if (!idea) return 'error';
+            
+            if (idea.status === 'generated') {
+                statusText.textContent = 'Project created! Redirecting...';
+                return 'generated';
+            } else if (idea.status === 'active' && idea.questions && idea.questions.length > 0) {
+                // Check if it's an error
+                try {
+                    const q = JSON.parse(idea.questions);
+                    if (q.error) {
+                        statusText.textContent = 'Error occurred';
+                        return 'error';
+                    }
+                } catch(e) {}
+                statusText.textContent = 'Architect has questions for you...';
+                return 'questions';
+            } else if (idea.status === 'error') {
+                statusText.textContent = 'Error occurred';
+                return 'error';
+            }
+            
+            // Still generating
+            const elapsed = (i + 1) * 3;
+            statusText.textContent = `Architect is working... (${elapsed}s elapsed)`;
+        } catch (e) {
+            console.error('Poll error:', e);
+        }
+    }
+    
+    statusText.textContent = 'Timed out waiting for architect';
+    return 'timeout';
 }
 
 async function submitAnswers(ideaId) {

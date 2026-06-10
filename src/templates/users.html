@@ -28,7 +28,6 @@
         {% endif %}
         <div class="user-actions">
             <button class="btn btn-sm" onclick="showEditUser({{ u.id }})">Edit</button>
-            <button class="btn btn-sm" onclick="showEditSizes({{ u.id }})">Méretek</button>
             <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
         </div>
     </div>
@@ -67,43 +66,18 @@
             </div>
             <div id="size-fields" style="display:none">
                 <label>Póla méretek</label>
-                <p class="help-text" style="margin-bottom:8px">Válaszd ki, melyik méreteket kezeli ez az user. Ugyanazt a méretet csak egy userhez lehet rendelni.</p>
-                <div id="create-sizes-conflict-info" style="display:none; background:#ff525222; border:1px solid #ff5252; padding:8px 12px; border-radius:4px; margin-bottom:8px; font-size:0.85em;"></div>
+                <p class="help-text" style="margin-bottom:8px">Válaszd ki, melyik póla méreteket kezeli ez az user. Ugyanazt a méretet csak egy userhez lehet rendelni.</p>
+                <div id="sizes-assignments-info" style="margin-bottom:8px; font-size:0.85em; color:var(--text2);"></div>
                 <div class="size-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px;">
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XS" id="create-size-XS"> <span class="badge complexity-xs">XS</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="S" id="create-size-S"> <span class="badge complexity-s">S</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="M" id="create-size-M"> <span class="badge complexity-m">M</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="L" id="create-size-L"> <span class="badge complexity-l">L</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XL" id="create-size-XL"> <span class="badge complexity-xl">XL</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XS" id="size-XS"> <span class="badge complexity-xs">XS</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="S" id="size-S"> <span class="badge complexity-s">S</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="M" id="size-M"> <span class="badge complexity-m">M</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="L" id="size-L"> <span class="badge complexity-l">L</span></label>
+                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XL" id="size-XL"> <span class="badge complexity-xl">XL</span></label>
                 </div>
-                <div id="create-sizes-assignments" style="font-size:0.85em; color:var(--text2);"></div>
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
         </form>
-    </div>
-</div>
-
-<!-- Default Sizes Modal -->
-<div id="sizes-modal" class="modal" style="display:none">
-    <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('sizes-modal')">&times;</span>
-        <h2>🎯 Póla méretek beállítása</h2>
-        <p class="help-text" style="margin-bottom:16px">
-            Válaszd ki, melyik póla méreteket kezeli ez az user. 
-            Ugyanazt a méretet csak egy userhez lehet rendelni.
-        </p>
-        <input type="hidden" id="sizes-user-id" value="">
-        <div id="sizes-conflict-info" style="display:none; background:#ff525222; border:1px solid #ff5252; padding:8px 12px; border-radius:4px; margin-bottom:12px; font-size:0.85em;"></div>
-        <div class="size-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
-            <label class="size-checkbox"><input type="checkbox" value="XS" id="size-XS"> <span class="badge complexity-xs">XS</span></label>
-            <label class="size-checkbox"><input type="checkbox" value="S" id="size-S"> <span class="badge complexity-s">S</span></label>
-            <label class="size-checkbox"><input type="checkbox" value="M" id="size-M"> <span class="badge complexity-m">M</span></label>
-            <label class="size-checkbox"><input type="checkbox" value="L" id="size-L"> <span class="badge complexity-l">L</span></label>
-            <label class="size-checkbox"><input type="checkbox" value="XL" id="size-XL"> <span class="badge complexity-xl">XL</span></label>
-        </div>
-        <div id="sizes-assignments" style="margin-bottom:16px; font-size:0.85em; color:var(--text2);"></div>
-        <button class="btn btn-primary" onclick="saveUserSizes()">Mentés</button>
-        <button class="btn btn-secondary" onclick="closeModal('sizes-modal')">Mégse</button>
     </div>
 </div>
 
@@ -133,10 +107,18 @@ async function fetchModels() {
 }
 
 function toggleAI(type) {
-    document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
-    document.getElementById('size-fields').style.display = type === 'ai' ? 'block' : 'none';
-    if (type === 'ai') {
-        loadCreateSizesAssignments();
+    const isAI = type === 'ai';
+    document.getElementById('ai-fields').style.display = isAI ? 'block' : 'none';
+    document.getElementById('size-fields').style.display = isAI ? 'block' : 'none';
+    if (isAI) {
+        loadSizesForModal();
+    } else {
+        // Reset size checkboxes when switching to human
+        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+            const cb = document.getElementById(`size-${size}`);
+            if (cb) cb.checked = false;
+        }
+        document.getElementById('sizes-assignments-info').innerHTML = '';
     }
 }
 
@@ -146,13 +128,6 @@ function showCreateUser() {
     document.getElementById('user-form').reset();
     document.getElementById('user-modal').style.display = 'flex';
     toggleAI('human');
-    // Reset size checkboxes
-    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        const cb = document.getElementById(`create-size-${size}`);
-        if (cb) cb.checked = false;
-    }
-    document.getElementById('create-sizes-assignments').innerHTML = '';
-    document.getElementById('create-sizes-conflict-info').style.display = 'none';
 }
 
 async function showEditUser(userId) {
@@ -172,7 +147,6 @@ async function showEditUser(userId) {
     if (u.type === 'ai') {
         // Load models first, then set the selected value
         await fetchModels();
-        // If the user's model is not in the list, add it as an option
         const modelSelect = document.getElementById('user-model');
         const existingOption = modelSelect.querySelector(`option[value="${u.model || ''}"]`);
         if (!existingOption && u.model) {
@@ -182,9 +156,70 @@ async function showEditUser(userId) {
             modelSelect.appendChild(opt);
         }
         modelSelect.value = u.model || '';
+
+        // Load user's current sizes and update checkboxes
+        await loadSizesForModal(userId);
     }
 
     document.getElementById('user-modal').style.display = 'flex';
+}
+
+async function loadSizesForModal(currentUserId) {
+    try {
+        const res = await fetch('/api/sizes');
+        const data = await res.json();
+        const assignments = data.assignments || {};
+        const infoDiv = document.getElementById('sizes-assignments-info');
+
+        let info = [];
+        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+            const checkbox = document.getElementById(`size-${size}`);
+            const assignment = assignments[size];
+
+            if (assignment) {
+                if (currentUserId && assignment.user_id === currentUserId) {
+                    // This user owns this size – enable and check it
+                    if (checkbox) {
+                        checkbox.disabled = false;
+                        checkbox.parentElement.style.opacity = '1';
+                        checkbox.checked = true;
+                    }
+                } else if (!currentUserId) {
+                    // Create mode – size is taken by someone else
+                    if (checkbox) {
+                        checkbox.disabled = true;
+                        checkbox.parentElement.style.opacity = '0.5';
+                        checkbox.checked = false;
+                    }
+                    info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
+                } else {
+                    // Edit mode – size is taken by another user
+                    if (checkbox) {
+                        checkbox.disabled = true;
+                        checkbox.parentElement.style.opacity = '0.5';
+                        checkbox.checked = false;
+                    }
+                    info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
+                }
+            } else {
+                // Size is free
+                if (checkbox) {
+                    checkbox.disabled = false;
+                    checkbox.parentElement.style.opacity = '1';
+                    // Don't change checked state for edit mode (will be set by caller)
+                    if (!currentUserId) checkbox.checked = false;
+                }
+            }
+        }
+
+        if (info.length > 0) {
+            infoDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
+        } else {
+            infoDiv.innerHTML = '';
+        }
+    } catch (e) {
+        console.error('Failed to load sizes for modal:', e);
+    }
 }
 
 async function saveUser(e) {
@@ -198,11 +233,10 @@ async function saveUser(e) {
 
     const res = await fetch(url, { method, body: fd });
     if (res.ok) {
-        // If creating new user, also save default sizes
-        if (!userId) {
-            const newUser = await res.json();
-            await saveDefaultSizesForNewUser(newUser.id);
-        }
+        // Save default sizes via dedicated endpoint
+        const resData = await res.json();
+        const savedUserId = userId || resData.id;
+        await saveSizesForUser(savedUserId);
         closeModal('user-modal');
         window.location.reload();
     } else {
@@ -212,19 +246,17 @@ async function saveUser(e) {
     return false;
 }
 
-async function saveDefaultSizesForNewUser(userId) {
+async function saveSizesForUser(userId) {
     const sizes = [];
     for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        const cb = document.getElementById(`create-size-${size}`);
-        if (cb && cb.checked) sizes.push(size);
+        const cb = document.getElementById(`size-${size}`);
+        if (cb && cb.checked && !cb.disabled) sizes.push(size);
     }
-    if (sizes.length > 0) {
-        await fetch(`/api/users/${userId}/default-sizes`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({sizes})
-        });
-    }
+    await fetch(`/api/users/${userId}/default-sizes`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sizes})
+    });
 }
 
 async function deleteUser(userId) {
@@ -235,129 +267,6 @@ async function deleteUser(userId) {
 
 function closeModal(id) {
     document.getElementById(id).style.display = 'none';
-}
-
-// ── Create modal sizes ───────────────────────────────
-
-async function loadCreateSizesAssignments() {
-    try {
-        const res = await fetch('/api/sizes');
-        const data = await res.json();
-        const assignments = data.assignments || {};
-        const conflictDiv = document.getElementById('create-sizes-conflict-info');
-        const assignmentsDiv = document.getElementById('create-sizes-assignments');
-        
-        let info = [];
-        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-            const checkbox = document.getElementById(`create-size-${size}`);
-            const assignment = assignments[size];
-            if (assignment) {
-                if (checkbox) {
-                    checkbox.disabled = true;
-                    checkbox.parentElement.style.opacity = '0.5';
-                }
-                info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
-            } else {
-                if (checkbox) {
-                    checkbox.disabled = false;
-                    checkbox.parentElement.style.opacity = '1';
-                }
-            }
-        }
-        
-        if (info.length > 0) {
-            assignmentsDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
-        } else {
-            assignmentsDiv.innerHTML = '';
-        }
-    } catch (e) {
-        console.error('Failed to load sizes for create modal:', e);
-    }
-}
-
-async function loadSizesAssignments() {
-    try {
-        const res = await fetch('/api/sizes');
-        const data = await res.json();
-        sizesAssignments = data.assignments || {};
-    } catch (e) {
-        console.error('Failed to load sizes:', e);
-    }
-}
-
-function updateSizesUI() {
-    // Update which sizes are taken by other users
-    const currentUserId = document.getElementById('sizes-user-id').value;
-    const conflictDiv = document.getElementById('sizes-conflict-info');
-    const assignmentsDiv = document.getElementById('sizes-assignments');
-    
-    let conflicts = [];
-    let info = [];
-    
-    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        const checkbox = document.getElementById(`size-${size}`);
-        const assignment = sizesAssignments[size];
-        
-        if (assignment && assignment.user_id != currentUserId) {
-            // Size is taken by another user
-            checkbox.disabled = true;
-            checkbox.parentElement.style.opacity = '0.5';
-            info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
-        } else {
-            checkbox.disabled = false;
-            checkbox.parentElement.style.opacity = '1';
-        }
-    }
-    
-    if (info.length > 0) {
-        assignmentsDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
-    } else {
-        assignmentsDiv.innerHTML = '';
-    }
-}
-
-async function showEditSizes(userId) {
-    document.getElementById('sizes-user-id').value = userId;
-    
-    // Load current assignments
-    await loadSizesAssignments();
-    
-    // Get user's current sizes
-    const res = await fetch(`/api/users/${userId}/default-sizes`);
-    const data = await res.json();
-    const currentSizes = data.default_sizes || [];
-    
-    // Reset all checkboxes
-    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        document.getElementById(`size-${size}`).checked = currentSizes.includes(size);
-    }
-    
-    updateSizesUI();
-    document.getElementById('sizes-modal').style.display = 'flex';
-}
-
-async function saveUserSizes() {
-    const userId = document.getElementById('sizes-user-id').value;
-    const sizes = [];
-    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        if (document.getElementById(`size-${size}`).checked) {
-            sizes.push(size);
-        }
-    }
-    
-    const res = await fetch(`/api/users/${userId}/default-sizes`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({sizes})
-    });
-    
-    if (res.ok) {
-        closeModal('sizes-modal');
-        window.location.reload();
-    } else {
-        const err = await res.json();
-        alert('Hiba: ' + (err.detail || JSON.stringify(err)));
-    }
 }
 
 document.querySelectorAll('.modal').forEach(m => {
