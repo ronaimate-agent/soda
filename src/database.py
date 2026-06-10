@@ -76,7 +76,7 @@ class Idea(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("status IN ('active', 'generating', 'generated', 'archived')", name="idea_status_check"),
+        CheckConstraint("status IN ('active', 'generating', 'generated', 'archived', 'error')", name="idea_status_check"),
     )
 
 
@@ -281,6 +281,18 @@ async def init_db():
                     size VARCHAR(3) NOT NULL CHECK (size IN ('XS', 'S', 'M', 'L', 'XL')),
                     PRIMARY KEY (user_id, size)
                 )
+            """)
+        except Exception:
+            pass
+        
+        # Update idea_status_check constraint to include 'error'
+        try:
+            await conn.exec_driver_sql("""
+                ALTER TABLE ideas DROP CONSTRAINT IF EXISTS idea_status_check
+            """)
+            await conn.exec_driver_sql("""
+                ALTER TABLE ideas ADD CONSTRAINT idea_status_check
+                    CHECK (status IN ('active', 'generating', 'generated', 'archived', 'error'))
             """)
         except Exception:
             pass

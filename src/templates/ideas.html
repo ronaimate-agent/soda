@@ -353,14 +353,37 @@ async function submitAnswers(ideaId) {
         } else {
             const text = await res.text();
             if (res.status === 504) {
-                throw new Error('The architect AI timed out while processing your answers. Please try again.');
+                throw new Error('Server timeout. Please try again.');
             }
             throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
         
-        overlay.style.display = 'none';
-
-        if (data.status === 'generated') {
+        if (data.status === 'generating') {
+            // Background task started – poll for result
+            const result = await pollIdeaStatus(ideaId);
+            overlay.style.display = 'none';
+            
+            if (result === 'generated') {
+                window.location.reload();
+            } else if (result === 'questions') {
+                window.location.reload();
+            } else if (result === 'error') {
+                const ideaRes = await fetch(`/api/ideas`);
+                const ideas = await ideaRes.json();
+                const idea = ideas.find(i => i.id === parseInt(ideaId));
+                let errorMsg = 'Generation failed.';
+                if (idea && idea.questions) {
+                    try {
+                        const q = JSON.parse(idea.questions);
+                        if (q.error) errorMsg = 'Error: ' + q.error;
+                    } catch(e) {}
+                }
+                alert(errorMsg);
+            } else {
+                alert('Generation timed out. Please try again.');
+            }
+        } else if (data.status === 'generated') {
+            overlay.style.display = 'none';
             let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
             if (data.repo_url) {
                 msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
@@ -368,10 +391,13 @@ async function submitAnswers(ideaId) {
             alert(msg);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
+            overlay.style.display = 'none';
             window.location.reload();
         } else if (data.detail) {
+            overlay.style.display = 'none';
             alert('Error: ' + data.detail);
         } else {
+            overlay.style.display = 'none';
             alert('Something went wrong. Try again.');
         }
     } catch (err) {

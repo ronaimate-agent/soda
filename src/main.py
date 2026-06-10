@@ -1329,7 +1329,6 @@ Return ONLY valid JSON, no other text."""
         return {"status": "generating", "idea_id": idea_id}
 
     async def _generate_project_background(
-        self_none: Any,
         idea_id: int,
         architect: User,
         prompt: str,
@@ -1388,7 +1387,7 @@ Return ONLY valid JSON, no other text."""
 
     @app.post("/api/ideas/{idea_id}/answer")
     async def answer_idea_questions(idea_id: int, answers: str = Form(...)):
-        """Submit answers to architect questions and continue generation."""
+        """Submit answers to architect questions and continue generation (async)."""
         async with async_session() as session:
             idea = await session.get(Idea, idea_id)
             if not idea:
@@ -1456,47 +1455,16 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 
 Return ONLY valid JSON, no other text."""
 
-        try:
-            result = await _call_architect(architect, prompt)
-        except Exception as e:
-            logger.error(f"Architect call failed for idea {idea_id}: {type(e).__name__}: {e}")
-            async with async_session() as session:
-                idea_obj = await session.get(Idea, idea_id)
-                if idea_obj:
-                    idea_obj.status = "active"
-                    await session.commit()
-                    logger.info(f"Idea {idea_id} status reset to active after architect failure")
-                else:
-                    logger.error(f"Idea {idea_id} not found when trying to reset status!")
-            raise
+        # Start background task
+        asyncio.create_task(_generate_project_background(
+            idea_id=idea_id,
+            architect=architect,
+            prompt=prompt,
+            repo_name=None,
+            repo_private=True,
+        ))
 
-        if result.get("type") == "questions":
-            questions = result.get("questions", [])
-            async with async_session() as session:
-                idea_obj = await session.get(Idea, idea_id)
-                idea_obj.status = "active"
-                idea_obj.pending_questions = json.dumps(questions)
-                await session.commit()
-            return {"status": "questions", "questions": questions, "idea_id": idea_id}
-
-        if result.get("type") == "generate":
-            try:
-                async with async_session() as session:
-                    idea = await session.get(Idea, idea_id)
-                return await _create_project_from_result(idea, result)
-            except HTTPException:
-                async with async_session() as session:
-                    idea_obj = await session.get(Idea, idea_id)
-                    if idea_obj:
-                        idea_obj.status = "active"
-                        await session.commit()
-                raise
-
-        async with async_session() as session:
-            idea_obj = await session.get(Idea, idea_id)
-            idea_obj.status = "active"
-            await session.commit()
-        raise HTTPException(500, "Unexpected architect response type")
+        return {"status": "generating", "idea_id": idea_id}
 
     # ── API: Users ─────────────────────────────────────────────────
 
