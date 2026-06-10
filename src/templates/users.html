@@ -14,10 +14,21 @@
         {% if u.type == 'ai' %}
         <div class="user-details">
             <div>Model: <code>{{ u.model or 'N/A' }}</code></div>
+            <div class="default-sizes">
+                <span class="sizes-label">Póla méretek:</span>
+                {% if u.default_sizes %}
+                    {% for size in u.default_sizes %}
+                    <span class="badge complexity-{{ size|lower }}">{{ size }}</span>
+                    {% endfor %}
+                {% else %}
+                    <span class="help-text">Nincs beállítva</span>
+                {% endif %}
+            </div>
         </div>
         {% endif %}
         <div class="user-actions">
             <button class="btn btn-sm" onclick="showEditUser({{ u.id }})">Edit</button>
+            <button class="btn btn-sm" onclick="showEditSizes({{ u.id }})">Méretek</button>
             <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
         </div>
     </div>
@@ -56,6 +67,30 @@
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
         </form>
+    </div>
+</div>
+
+<!-- Default Sizes Modal -->
+<div id="sizes-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('sizes-modal')">&times;</span>
+        <h2>🎯 Póla méretek beállítása</h2>
+        <p class="help-text" style="margin-bottom:16px">
+            Válaszd ki, melyik póla méreteket kezeli ez az user. 
+            Ugyanazt a méretet csak egy userhez lehet rendelni.
+        </p>
+        <input type="hidden" id="sizes-user-id" value="">
+        <div id="sizes-conflict-info" style="display:none; background:#ff525222; border:1px solid #ff5252; padding:8px 12px; border-radius:4px; margin-bottom:12px; font-size:0.85em;"></div>
+        <div class="size-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
+            <label class="size-checkbox"><input type="checkbox" value="XS" id="size-XS"> <span class="badge complexity-xs">XS</span></label>
+            <label class="size-checkbox"><input type="checkbox" value="S" id="size-S"> <span class="badge complexity-s">S</span></label>
+            <label class="size-checkbox"><input type="checkbox" value="M" id="size-M"> <span class="badge complexity-m">M</span></label>
+            <label class="size-checkbox"><input type="checkbox" value="L" id="size-L"> <span class="badge complexity-l">L</span></label>
+            <label class="size-checkbox"><input type="checkbox" value="XL" id="size-XL"> <span class="badge complexity-xl">XL</span></label>
+        </div>
+        <div id="sizes-assignments" style="margin-bottom:16px; font-size:0.85em; color:var(--text2);"></div>
+        <button class="btn btn-primary" onclick="saveUserSizes()">Mentés</button>
+        <button class="btn btn-secondary" onclick="closeModal('sizes-modal')">Mégse</button>
     </div>
 </div>
 
@@ -155,6 +190,96 @@ async function deleteUser(userId) {
 function closeModal(id) {
     document.getElementById(id).style.display = 'none';
 }
+
+// ── Default Sizes ─────────────────────────────────────
+
+let sizesAssignments = {};
+
+async function loadSizesAssignments() {
+    try {
+        const res = await fetch('/api/sizes');
+        const data = await res.json();
+        sizesAssignments = data.assignments || {};
+    } catch (e) {
+        console.error('Failed to load sizes:', e);
+    }
+}
+
+function updateSizesUI() {
+    // Update which sizes are taken by other users
+    const currentUserId = document.getElementById('sizes-user-id').value;
+    const conflictDiv = document.getElementById('sizes-conflict-info');
+    const assignmentsDiv = document.getElementById('sizes-assignments');
+    
+    let conflicts = [];
+    let info = [];
+    
+    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+        const checkbox = document.getElementById(`size-${size}`);
+        const assignment = sizesAssignments[size];
+        
+        if (assignment && assignment.user_id != currentUserId) {
+            // Size is taken by another user
+            checkbox.disabled = true;
+            checkbox.parentElement.style.opacity = '0.5';
+            info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
+        } else {
+            checkbox.disabled = false;
+            checkbox.parentElement.style.opacity = '1';
+        }
+    }
+    
+    if (info.length > 0) {
+        assignmentsDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
+    } else {
+        assignmentsDiv.innerHTML = '';
+    }
+}
+
+async function showEditSizes(userId) {
+    document.getElementById('sizes-user-id').value = userId;
+    
+    // Load current assignments
+    await loadSizesAssignments();
+    
+    // Get user's current sizes
+    const res = await fetch(`/api/users/${userId}/default-sizes`);
+    const data = await res.json();
+    const currentSizes = data.default_sizes || [];
+    
+    // Reset all checkboxes
+    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+        document.getElementById(`size-${size}`).checked = currentSizes.includes(size);
+    }
+    
+    updateSizesUI();
+    document.getElementById('sizes-modal').style.display = 'flex';
+}
+
+async function saveUserSizes() {
+    const userId = document.getElementById('sizes-user-id').value;
+    const sizes = [];
+    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
+        if (document.getElementById(`size-${size}`).checked) {
+            sizes.push(size);
+        }
+    }
+    
+    const res = await fetch(`/api/users/${userId}/default-sizes`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sizes})
+    });
+    
+    if (res.ok) {
+        closeModal('sizes-modal');
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert('Hiba: ' + (err.detail || JSON.stringify(err)));
+    }
+}
+
 document.querySelectorAll('.modal').forEach(m => {
     m.addEventListener('click', e => { if (e.target === m) m.style.display = 'none'; });
 });

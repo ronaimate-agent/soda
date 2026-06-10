@@ -157,6 +157,23 @@ class TaskGitState(Base):
     last_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class UserDefaultSize(Base):
+    """Maps users to their default polo sizes. Each size can only belong to one user."""
+    __tablename__ = "user_default_sizes"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    size: Mapped[str] = mapped_column(String(3), primary_key=True)  # XS, S, M, L, XL
+
+    __table_args__ = (
+        CheckConstraint(
+            "size IN ('XS', 'S', 'M', 'L', 'XL')",
+            name="user_default_size_check",
+        ),
+    )
+
+
 async def init_db():
     # Create all tables
     async with engine.begin() as conn:
@@ -252,6 +269,18 @@ async def init_db():
                 EXCEPTION WHEN duplicate_object THEN
                     NULL;
                 END $$;
+            """)
+        except Exception:
+            pass
+        
+        # Create user_default_sizes table if not exists (auto-migration)
+        try:
+            await conn.exec_driver_sql("""
+                CREATE TABLE IF NOT EXISTS user_default_sizes (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    size VARCHAR(3) NOT NULL CHECK (size IN ('XS', 'S', 'M', 'L', 'XL')),
+                    PRIMARY KEY (user_id, size)
+                )
             """)
         except Exception:
             pass

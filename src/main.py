@@ -19,9 +19,12 @@ from pydantic import BaseModel
 
 from .database import (
     GlobalSetting, Idea, Project, Task, TaskComment, TaskDependency, User,
-    TaskGitState, async_session, init_db, sa_select,
+    TaskGitState, UserDefaultSize, async_session, init_db, sa_select,
 )
-from .utils import get_setting, get_opencode_api_key, write_opencode_auth, get_or_404
+from .utils import (
+    get_setting, get_opencode_api_key, write_opencode_auth, get_or_404,
+    get_user_default_sizes, set_user_default_sizes, find_user_by_size, VALID_SIZES,
+)
 from .github_service import GitHubService
 from .models import CallbackPayload, TaskMovePayload, CommentPayload
 
@@ -680,27 +683,35 @@ def create_app() -> FastAPI:
         complexity: Optional[str] = Form(None),
     ):
         async with async_session() as session:
-            project = await session.get(Project, project_id)
-            if not project:
-                raise HTTPException(404, "Project not found")
+            project = await get_or_404(session, Project, project_id, "Project")
             # Get max position
             result = await session.execute(
                 sa_select(Task).where(Task.project_id == project_id).order_by(Task.position.desc()).limit(1)
             )
             last = result.scalar_one_or_none()
             pos = (last.position + 1) if last else 0
+            
+            # Auto-assign based on complexity if no assignee specified
+            final_assignee_id = assignee_id
+            if final_assignee_id is None and complexity:
+                # Find user assigned to this size
+                assigned_user_id = await find_user_by_size(session, complexity)
+                if assigned_user_id:
+                    final_assignee_id = assigned_user_id
+                    logger.info(f"Task '{title}' auto-assigned to user {assigned_user_id} based on size {complexity}")
+            
             task = Task(
                 project_id=project_id,
                 title=title,
                 description=description,
-                assignee_id=assignee_id,
+                assignee_id=final_assignee_id,
                 complexity=complexity,
                 position=pos,
             )
             session.add(task)
             await session.commit()
             await session.refresh(task)
-            return {"id": task.id, "title": task.title, "column": task.board_column}
+            return {"id": task.id, "title": task.title, "column": task.board_column, "assignee_id": task.assignee_id}
 
     @app.get("/api/tasks/{task_id}")
     async def get_task(task_id: int):
@@ -1446,6 +1457,11 @@ Return ONLY valid JSON, no other text."""
         async with async_session() as session:
             result = await session.execute(sa_select(User).order_by(User.name))
             users = result.scalars().all()
+            # Get all default sizes in one query
+            sizes_result = await session.execute(sa_select(UserDefaultSize.user_id, UserDefaultSize.size))
+            sizes_map: dict[int, list[str]] = {}
+            for uid, size in sizes_result.all():
+                sizes_map.setdefault(uid, []).append(size)
             return [
                 {
                     "id": u.id,
@@ -1456,9 +1472,60 @@ Return ONLY valid JSON, no other text."""
                     "model": u.model,
                     "system_prompt": u.system_prompt,
                     "execute_command": u.execute_command,
+                    "default_sizes": sizes_map.get(u.id, []),
                 }
                 for u in users
             ]
+
+    @app.get("/api/users/{user_id}/default-sizes")
+    async def get_user_sizes(user_id: int):
+        """Get default polo sizes for a user."""
+        async with async_session() as session:
+            user = await get_or_404(session, User, user_id)
+            sizes = await get_user_default_sizes(session, user_id)
+            return {"user_id": user_id, "default_sizes": sizes}
+
+    @app.put("/api/users/{user_id}/default-sizes")
+    async def update_user_sizes(user_id: int, payload: dict):
+        """
+        Set default polo sizes for a user.
+        Body: {"sizes": ["XS", "S"]}
+        Each size can only be assigned to one user.
+        """
+        sizes = payload.get("sizes", [])
+        if not isinstance(sizes, list):
+            raise HTTPException(400, "sizes must be a list")
+        
+        async with async_session() as session:
+            user = await get_or_404(session, User, user_id)
+            try:
+                await set_user_default_sizes(session, user_id, sizes)
+                await session.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error setting default sizes for user {user_id}: {e}")
+                raise HTTPException(500, f"Failed to set default sizes: {str(e)}")
+            
+            return {"user_id": user_id, "default_sizes": sizes}
+
+    @app.get("/api/sizes")
+    async def list_sizes():
+        """List all polo sizes and their assigned users."""
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(UserDefaultSize.size, UserDefaultSize.user_id, User.name)
+                .join(User, User.id == UserDefaultSize.user_id)
+                .order_by(UserDefaultSize.size)
+            )
+            assignments = {}
+            for size, uid, uname in result.all():
+                assignments[size] = {"user_id": uid, "user_name": uname}
+            
+            return {
+                "valid_sizes": VALID_SIZES,
+                "assignments": assignments,
+            }
 
     @app.post("/api/users")
     async def create_user(
