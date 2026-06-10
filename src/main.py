@@ -1095,7 +1095,7 @@ def create_app() -> FastAPI:
         logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
         
         proc = await asyncio.create_subprocess_shell(
-            f'opencode run {json.dumps(prompt)}',
+            f'opencode run --pure {json.dumps(prompt)}',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -1105,8 +1105,8 @@ def create_app() -> FastAPI:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            logger.error(f"Architect timed out after 120s")
-            raise HTTPException(504, "Architect AI timed out after 120s. The prompt may be too complex or the AI service is slow. Try again or use a shorter description.")
+            logger.error(f"Architect timed out after 60s")
+            raise HTTPException(504, "Architect AI timed out after 60s. The prompt may be too complex or the AI service is slow. Try again or use a shorter description.")
         output = stdout.decode().strip()
         error_output = stderr.decode().strip()
         
