@@ -27,6 +27,7 @@ from .utils import (
 )
 from .github_service import GitHubService
 from .models import CallbackPayload, TaskMovePayload, CommentPayload
+from .operations import get_operation_command, set_operation_command, get_all_operation_commands, generate_task_prompt
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -176,17 +177,21 @@ def create_app() -> FastAPI:
         comments: Optional[list] = None,
         depends_on_ids: Optional[list] = None,
     ) -> None:
-        """Run the AI user's execute command as a subprocess.
+        """Run the task_run operation command as a subprocess.
+        The command is read from the op_cmd_task_run setting (not from the user).
+        The prompt is generated dynamically from the task context.
         Clones the project repo, checks out main, provides context,
         then after AI completes: git commit/push, create PR, send callback."""
-        if not assignee.execute_command:
-            logger.warning(f"Task {task.id}: assignee {assignee.name} has no execute_command")
+        # Get the operation command (NOT from user)
+        operation_cmd = await get_operation_command("task_run")
+        if not operation_cmd:
+            logger.error(f"Task {task.id}: op_cmd_task_run is empty")
             try:
                 async with async_session() as err_session:
                     err_session.add(TaskComment(
                         task_id=task.id,
                         author="Soda",
-                        content=f"❌ AI user `{assignee.name}` has no execute_command configured. Edit the user in Settings → Users.",
+                        content="❌ op_cmd_task_run is not configured. Go to Settings → Operations.",
                     ))
                     await err_session.commit()
             except Exception:
@@ -194,7 +199,6 @@ def create_app() -> FastAPI:
             return
 
         # ── Register task as "starting" in running_processes so watchdog doesn't kill it ──
-        # Sentinel: tuple of (None, "starting", started_at_iso)
         from datetime import datetime as _dt_start
         running_processes[task.id] = (None, "starting", _dt_start.utcnow().isoformat())
         logger.info(f"Task {task.id}: registered as starting, launching AI run...")
@@ -236,7 +240,7 @@ def create_app() -> FastAPI:
             with open(OPENCODE_AUTH, "w") as f:
                 json.dump(auth_data, f)
 
-        # Build comments JSON and collect context
+        # Get project + settings for prompt generation
         async with async_session() as session:
             setting_res = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
@@ -253,49 +257,8 @@ def create_app() -> FastAPI:
             git_token = await get_setting("git_token")
             default_branch = await get_setting("git_default_branch", "main")
 
-            remaining_result = await session.execute(
-                sa_select(Task).where(
-                    Task.project_id == task.project_id,
-                    Task.id != task.id,
-                ).order_by(Task.id)
-            )
-            remaining_tasks = remaining_result.scalars().all()
-            remaining_task_ids = [t.id for t in remaining_tasks]
-
-            # Fetch dependencies among remaining tasks
-            remaining_deps = {}  # task_id -> [depends_on_id]
-            if remaining_task_ids:
-                dep_result = await session.execute(
-                    sa_select(TaskDependency.task_id, TaskDependency.depends_on_id)
-                    .where(TaskDependency.task_id.in_(remaining_task_ids))
-                )
-                for tid, dep_id in dep_result.all():
-                    remaining_deps.setdefault(tid, []).append(dep_id)
-
-            # Title lookup for deps
-            task_titles = {t.id: t.title for t in remaining_tasks}
-
-            def _task_status_icon(t: Task) -> str:
-                return {
-                    "backlog": "📋",
-                    "running": "▶️",
-                    "blocked": "❓",
-                    "review": "👁️",
-                    "done": "✅",
-                }.get(t.board_column, "•")
-
-            def _deps_str(t: Task) -> str:
-                deps = remaining_deps.get(t.id, [])
-                if not deps:
-                    return ""
-                # Resolve dep titles
-                dep_titles = [task_titles.get(d, f"#{d}") for d in deps]
-                return f" *(depends on: {', '.join(dep_titles)})*"
-
-            remaining_summary = "\n".join(
-                f"- {_task_status_icon(t)} [{t.board_column}] **{t.title}**: {t.description or '(no description)'}{_deps_str(t)}"
-                for t in remaining_tasks
-            )
+        # Generate the full prompt dynamically (from operations module)
+        full_prompt = await generate_task_prompt(task, project, comments, depends_on_ids)
 
         # Build authenticated repo URL
         auth_repo_url = repo_url
@@ -304,39 +267,10 @@ def create_app() -> FastAPI:
             auth_repo_url = auth_repo_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
 
         # Create task workdir and clone repo
-        # IMPORTANT: do the git clone with a long timeout (180s) so large repos don't fail.
-        # Save prompt comment FIRST so user sees it immediately even if clone is slow.
         workdir_base = Path("/tmp/soda-task-workdirs")
         workdir_base.mkdir(parents=True, exist_ok=True)
         workdir = workdir_base / f"task-{task.id}"
         workdir.mkdir(parents=True, exist_ok=True)
-
-        # Build the full prompt with context
-        full_prompt = f"""You are working on a software project.
-
-## Project: {project_name}
-
-## Your Task (ONLY work on this):
-|**Title:** {task.title}
-|**Description:** {task.description or '(no description)'}
-|**Complexity:** {task.complexity or 'not specified'}
-
-## Other tasks in this project (DO NOT work on these — they are separate tasks):
-{remaining_summary if remaining_summary else '(none)'}
-
-## Existing comments on this task:
-{json.dumps(comments, indent=2) if comments else '(none)'}
-
-## Work Instructions:
-- ONLY implement what is described in "Your Task" above
-- Do NOT work on any of the other tasks listed above
-- If a task in the list above depends on yours (i.e. your task must complete first), still focus on your own work — do not start the dependent task
-- If a task above is already done (✅), review what was implemented to keep your work consistent
-- Work ONLY in the current directory: {workdir}
-- Create/edit files directly in this directory
-- Do NOT call any callback URL — the system handles that automatically
-- If you cannot complete the task, describe what is blocking you as the last line of your output
-"""
 
         # Write prompt to file (prevents shell quoting issues with special chars)
         prompt_file = workdir / ".soda-prompt.txt"
@@ -350,7 +284,6 @@ def create_app() -> FastAPI:
                     model_info = f"\n\n**Model:** `{assignee.model}`"
                 if assignee.provider:
                     model_info += f" (provider: `{assignee.provider}`)"
-                # Also mark the start of the AI run
                 from datetime import datetime as _dt
                 start_msg = (
                     f"📋 **Prompt sent to AI:**{model_info}\n\n"
@@ -367,7 +300,6 @@ def create_app() -> FastAPI:
                 logger.info(f"Task {task.id}: prompt comment saved to DB")
         except Exception as e:
             logger.error(f"Task {task.id}: failed to save prompt comment: {e}")
-            # Save a short error comment so user can see something went wrong
             try:
                 async with async_session() as err_session:
                     err_session.add(TaskComment(
@@ -396,7 +328,6 @@ def create_app() -> FastAPI:
             except Exception as e:
                 clone_error = str(e)[:500]
                 logger.warning(f"Task {task.id}: git clone failed: {clone_error}")
-                # Save a comment about the clone failure
                 try:
                     async with async_session() as err_session:
                         err_session.add(TaskComment(
@@ -414,8 +345,8 @@ def create_app() -> FastAPI:
             env["OPENCODE_API_KEY"] = api_key
             env["OPENROUTER_API_KEY"] = api_key
 
-        # Resolve template variables in execute_command
-        cmd = assignee.execute_command or ""
+        # Resolve template variables in the OPERATION command (not user's command)
+        cmd = operation_cmd
         cmd = cmd.replace("{{task.id}}", str(task.id))
         cmd = cmd.replace("{{task.title}}", task.title or "")
         cmd = cmd.replace("{{task.description}}", task.description or "")
@@ -424,12 +355,10 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
         cmd = cmd.replace("{{task.workdir}}", str(workdir))
-        # Replace {{task.prompt}} with file contents via shell substitution
         cmd = cmd.replace("'{{task.prompt}}'", f'"$(cat {prompt_file})"')
-        # Fallback: if no quotes were used, replace with file path
         cmd = cmd.replace("{{task.prompt}}", str(prompt_file))
 
-        # Run OpenCode
+        # Run the operation command as subprocess
         stdout_file = workdir / ".soda-stdout.log"
         stderr_file = workdir / ".soda-stderr.log"
         stdout_fd = open(stdout_file, "w")
@@ -1867,7 +1796,6 @@ Return ONLY valid JSON, no other text."""
                     "provider": u.provider,
                     "model": u.model,
                     "system_prompt": u.system_prompt,
-                    "execute_command": u.execute_command,
                     "task_types": u.task_types or [],
                 }
                 for u in users
@@ -1941,19 +1869,8 @@ Return ONLY valid JSON, no other text."""
         api_key: str = Form(""),
         model: str = Form(""),
         system_prompt: str = Form(""),
-        execute_command: str = Form(""),
     ):
         async with async_session() as session:
-            # Auto-populate execute_command for AI users if not provided
-            final_execute_command = execute_command or None
-            if type == "ai" and not final_execute_command:
-                _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
-                final_execute_command = (
-                    "opencode run '{{task.prompt}}' && "
-                    "curl -s -X POST '" + _callback_tpl + "&status=review' "
-                    "|| true"
-                )
-
             user = User(
                 name=name,
                 type=type,
@@ -1961,7 +1878,6 @@ Return ONLY valid JSON, no other text."""
                 api_key=api_key or None,
                 model=model or None,
                 system_prompt=system_prompt or None,
-                execute_command=final_execute_command,
                 task_types=[],
             )
             session.add(user)
@@ -1978,7 +1894,6 @@ Return ONLY valid JSON, no other text."""
         api_key: Optional[str] = Form(None),
         model: Optional[str] = Form(None),
         system_prompt: Optional[str] = Form(None),
-        execute_command: Optional[str] = Form(None),
     ):
         async with async_session() as session:
             user = await session.get(User, user_id)
@@ -1996,17 +1911,6 @@ Return ONLY valid JSON, no other text."""
                 user.model = model or None
             if system_prompt is not None:
                 user.system_prompt = system_prompt or None
-            if execute_command is not None:
-                user.execute_command = execute_command or None
-            # If user is AI but has no execute_command, auto-populate with default
-            if user.type == "ai" and not user.execute_command:
-                _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
-                user.execute_command = (
-                    "opencode run '{{task.prompt}}' && "
-                    "curl -s -X POST '" + _callback_tpl + "&status=review' "
-                    "|| true"
-                )
-                logger.info(f"User {user_id} ({user.name}): auto-populated default execute_command")
             await session.commit()
             return {"ok": True}
 
@@ -2048,6 +1952,36 @@ Return ONLY valid JSON, no other text."""
             await session.commit()
         
         return {"ok": True, "updated": list(data.keys())}
+
+    # ── API: Operation Commands ───────────────────────────────────────
+
+    @app.get("/api/operations")
+    async def list_operations():
+        """List all operation commands (task_run, merge, etc.)."""
+        try:
+            cmds = await get_all_operation_commands()
+            return cmds
+        except Exception as e:
+            logger.error(f"Error listing operations: {e}")
+            return {}
+
+    @app.patch("/api/operations/{op}")
+    async def update_operation(op: str, request: Request):
+        """Update an operation command template."""
+        try:
+            body = await request.json()
+            value = body.get("value", "")
+        except Exception:
+            data = await request.form()
+            value = str(data.get("value", ""))
+        try:
+            await set_operation_command(op, value)
+            return {"ok": True}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            logger.error(f"Error updating operation {op}: {e}")
+            raise HTTPException(500, str(e))
 
     # ── API: Models ────────────────────────────────────────────────
 

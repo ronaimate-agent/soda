@@ -408,25 +408,6 @@ async def init_db():
         if not result.scalars().all():
             _default_model = "anthropic/claude-sonnet-4"
 
-            # Execute commands: run OpenCode, then auto-send callback
-            _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
-            _junior_exec = (
-                "opencode run '{{task.prompt}}' && "
-                "curl -s -X POST '" + _callback_tpl + "&status=review' "
-                "|| true"
-            )
-            _medior_exec = _junior_exec
-            _senior_exec = _junior_exec
-            _taskmaster_exec = (
-                "opencode run 'You are the Task Master. Analyze the following project idea and break it down into actionable tasks.\n\n"
-                "Project: {{project.name}}\n"
-                "Description: {{project.description}}\n\n"
-                "Create a structured task list with dependencies. Output as JSON with project_name, project_description, and tasks array. "
-                "Each task should have: title, description, complexity (low/medium/high), assignee_role (junior/medior/senior), "
-                "and depends_on (array of task indices, empty if none).\n\n"
-                "IMPORTANT: Output ONLY valid JSON, no markdown formatting or code blocks.'"
-            )
-
             seed_users = [
                 User(
                     name="Project Owner",
@@ -462,7 +443,6 @@ async def init_db():
                         '  ]\n'
                         '}'
                     ),
-                    execute_command=_taskmaster_exec,
                 ),
                 User(
                     name="Junior Developer",
@@ -477,7 +457,6 @@ async def init_db():
                         "- Create/modify files in the working directory\n"
                         "- When finished, report back via the callback URL with status=review"
                     ),
-                    execute_command=_junior_exec,
                 ),
                 User(
                     name="Medior Developer",
@@ -492,7 +471,6 @@ async def init_db():
                         "- Create/modify files in the working directory\n"
                         "- When finished, report back via the callback URL with status=review"
                     ),
-                    execute_command=_medior_exec,
                 ),
                 User(
                     name="Senior Developer",
@@ -507,31 +485,9 @@ async def init_db():
                         "- Create/modify files in the working directory\n"
                         "- When finished, report back via the callback URL with status=review"
                     ),
-                    execute_command=_senior_exec,
                 ),
             ]
 
             for u in seed_users:
                 session.add(u)
-            await session.commit()
-
-    # Backfill execute_command for existing AI users that don't have one
-    async with async_session() as session:
-        result = await session.execute(
-            sa_select(User).where(
-                User.type == "ai",
-                (User.execute_command.is_(None)) | (User.execute_command == ""),
-            )
-        )
-        ai_users_without_cmd = result.scalars().all()
-        if ai_users_without_cmd:
-            _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
-            default_cmd = (
-                "opencode run '{{task.prompt}}' && "
-                "curl -s -X POST '" + _callback_tpl + "&status=review' "
-                "|| true"
-            )
-            for u in ai_users_without_cmd:
-                u.execute_command = default_cmd
-                print(f"Backfilled execute_command for AI user: {u.name} (id={u.id})")
             await session.commit()

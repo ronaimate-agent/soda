@@ -74,7 +74,80 @@
         <button type="submit" class="btn btn-primary" style="margin-top:24px">Save Settings</button>
         <span id="save-indicator" style="display:none; margin-left:12px; color:var(--green)">✓ Saved</span>
     </form>
-</div>
+    </div>
+
+    <!-- ── Operations Editor (separate form) ── -->
+    <div class="settings-form" style="margin-top:24px">
+        <h3>⚡ Operation Commands</h3>
+        <p class="help-text">These commands define what happens when an operation is executed. Template variables: <code>{{task.id}}</code>, <code>{{task.title}}</code>, <code>{{task.description}}</code>, <code>{{task.prompt}}</code>, <code>{{task.workdir}}</code>, <code>{{project.name}}</code>, <code>{{callback.url}}</code></p>
+
+        <div id="ops-list">
+            <p class="help-text">Loading operation commands...</p>
+        </div>
+    </div>
+
+<script>
+async function saveSettings(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
+    if (res.ok) {
+        const ind = document.getElementById('save-indicator');
+        ind.style.display = 'inline';
+        setTimeout(() => ind.style.display = 'none', 2000);
+    } else {
+        const err = await res.json();
+        alert('Failed to save settings: ' + (err.detail || JSON.stringify(err)));
+    }
+    return false;
+}
+
+// Load operation commands
+async function loadOperations() {
+    const res = await fetch('/api/operations');
+    const ops = await res.json();
+    const container = document.getElementById('ops-list');
+    if (!ops || Object.keys(ops).length === 0) {
+        container.innerHTML = '<p class="help-text">No operations configured. Using defaults.</p>';
+        return;
+    }
+    let html = '';
+    for (const [op, info] of Object.entries(ops)) {
+        const label = op === 'task_run' ? 'Task Run Command' : op === 'op_cmd_merge' ? 'Merge Command' : op;
+        const help = op === 'task_run'
+            ? "Executed when a task is moved to Running. Use {{task.prompt}} for the AI prompt."
+            : op === 'op_cmd_merge'
+            ? "Executed when merging a task's branch into the default branch."
+            : '';
+        html += `<div class="form-group" style="margin-top:16px">
+            <label><strong>${label}</strong> <span class="help-text">(${help})</span></label>
+            <textarea id="op-cmd-${op}" rows="4" class="input-mono" style="width:100%; font-family:monospace; font-size:13px;">${info.value}</textarea>
+            <p class="help-text">Default: <code>${info.default}</code></p>
+            <button type="button" class="btn btn-sm" onclick="saveOperation('${op}')" style="margin-top:4px">Save</button>
+            <button type="button" class="btn btn-sm" onclick="resetOperation('${op}', \`${info.default.replace(/`/g, '\\`')}\`)" style="margin-top:4px; margin-left:4px">Reset to Default</button>
+        </div>`;
+    }
+    container.innerHTML = html;
+}
+
+async function saveOperation(op) {
+    const value = document.getElementById(`op-cmd-${op}`).value;
+    const res = await fetch(`/api/operations/${op}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({value})
+    });
+    if (res.ok) alert('Saved!');
+    else alert('Failed to save');
+}
+
+function resetOperation(op, defaultValue) {
+    document.getElementById(`op-cmd-${op}`).value = defaultValue;
+}
+
+loadOperations();
+</script>
+{% endblock %}
 
 <style>
 .provider-card {
