@@ -10,18 +10,18 @@
     <div class="user-card" data-user-id="{{ u.id }}">
         <div class="user-type-badge {{ u.type }}">{{ u.type }}</div>
         <h3>{{ u.name }}</h3>
-        {% if u.role %}<p class="user-role">{{ u.role }}</p>{% endif %}
         {% if u.type == 'ai' %}
         <div class="user-details">
+            <div>Provider: <code>{{ u.provider or 'N/A' }}</code></div>
             <div>Model: <code>{{ u.model or 'N/A' }}</code></div>
-            <div class="default-sizes">
-                <span class="sizes-label">Póla méretek:</span>
-                {% if u.default_sizes %}
-                    {% for size in u.default_sizes %}
-                    <span class="badge complexity-{{ size|lower }}">{{ size }}</span>
+            <div class="task-types">
+                <span class="sizes-label">Task types:</span>
+                {% if u.task_types %}
+                    {% for t in u.task_types %}
+                    <span class="badge task-type-{{ t }}">{{ t }}</span>
                     {% endfor %}
                 {% else %}
-                    <span class="help-text">Nincs beállítva</span>
+                    <span class="help-text">None</span>
                 {% endif %}
             </div>
         </div>
@@ -33,7 +33,7 @@
     </div>
     {% else %}
     <div class="empty-state">
-        <p>No users yet. Create a human or AI user to get started.</p>
+        <p>No users yet. Create humans or AI users with task types.</p>
     </div>
     {% endfor %}
 </div>
@@ -47,33 +47,56 @@
             <input type="hidden" name="user_id" id="user-id" value="">
             <label>Name</label>
             <input type="text" name="name" id="user-name" required>
-            <label>Role</label>
-            <input type="text" name="role" id="user-role" placeholder="e.g. Senior Dev, Architect, Tester">
+
             <label>Type</label>
             <select name="type" id="user-type" onchange="toggleAI(this.value)">
                 <option value="human">Human</option>
                 <option value="ai">AI</option>
             </select>
+
             <div id="ai-fields" style="display:none">
+                <label>Provider</label>
+                <select name="provider" id="user-provider" onchange="fetchModelsForProvider()" style="margin-bottom:8px">
+                    <option value="">Loading providers...</option>
+                </select>
+                <p class="help-text" id="provider-help"></p>
+
                 <label>Model</label>
                 <div style="display:flex; gap:8px; align-items:center;">
                     <select name="model" id="user-model" style="flex:1">
-                        <option value="">Select model...</option>
+                        <option value="">Select a provider first</option>
                     </select>
-                    <button type="button" class="btn btn-sm" onclick="fetchModels()">🔄 Load</button>
+                    <button type="button" class="btn btn-sm" onclick="fetchModelsForProvider()">🔄 Load</button>
                 </div>
-                <p class="help-text" id="model-help">Click "Load" to fetch available models from OpenCode</p>
-            </div>
-            <div id="size-fields" style="display:none">
-                <label>Póla méretek</label>
-                <p class="help-text" style="margin-bottom:8px">Válaszd ki, melyik póla méreteket kezeli ez az user. Ugyanazt a méretet csak egy userhez lehet rendelni.</p>
-                <div id="sizes-assignments-info" style="margin-bottom:8px; font-size:0.85em; color:var(--text2);"></div>
-                <div class="size-checkboxes" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:8px;">
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XS" id="size-XS"> <span class="badge complexity-xs">XS</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="S" id="size-S"> <span class="badge complexity-s">S</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="M" id="size-M"> <span class="badge complexity-m">M</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="L" id="size-L"> <span class="badge complexity-l">L</span></label>
-                    <label class="size-checkbox"><input type="checkbox" name="default_sizes" value="XL" id="size-XL"> <span class="badge complexity-xl">XL</span></label>
+                <p class="help-text" id="model-help"></p>
+
+                <label style="margin-top:16px">Task types this user handles</label>
+                <p class="help-text" style="margin-bottom:8px">
+                    Pick complexity levels (XS/S/M/L/XL) and/or special roles (task_manager, merger).
+                    Each size can only be assigned to one user.
+                </p>
+                <div class="size-checkboxes" style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="xs"> <span class="badge">XS</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="s"> <span class="badge">S</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="m"> <span class="badge">M</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="l"> <span class="badge">L</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="xl"> <span class="badge">XL</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="task_manager"> <span class="badge role-badge">task_manager</span>
+                    </label>
+                    <label class="task-type-checkbox">
+                        <input type="checkbox" name="task_types" value="merger"> <span class="badge role-badge">merger</span>
+                    </label>
                 </div>
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
@@ -81,44 +104,104 @@
     </div>
 </div>
 
+<style>
+.task-type-checkbox { display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--bg2); border-radius: 4px; cursor: pointer; }
+.task-type-badge { font-weight: 500; }
+.role-badge { background: #8b5cf6; color: white; }
+.task-type-xs, .task-type-s { background: #22c55e; color: white; }
+.task-type-m, .task-type-l { background: #f59e0b; color: white; }
+.task-type-xl { background: #ef4444; color: white; }
+</style>
+
 <script>
-async function fetchModels() {
-    const helpText = document.getElementById('model-help');
-    const modelSelect = document.getElementById('user-model');
-    
-    helpText.textContent = 'Loading models...';
-    
+let currentProviders = [];
+let currentTaskTypeAssignments = {};
+
+async function loadProviders() {
     try {
-        const res = await fetch('/api/models');
+        const res = await fetch('/api/providers');
+        const data = await res.json();
+        currentProviders = data.providers || [];
+        const sel = document.getElementById('user-provider');
+        sel.innerHTML = '<option value="">Select provider...</option>';
+        for (const p of currentProviders) {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name + (p.configured ? '' : ' (no API key)');
+            sel.appendChild(opt);
+        }
+        const help = document.getElementById('provider-help');
+        if (currentProviders.length === 0) {
+            help.innerHTML = '⚠️ No providers enabled. <a href="/settings">Configure in Settings</a>.';
+            help.style.color = '#ef4444';
+        } else {
+            help.innerHTML = `${currentProviders.length} provider(s) available.`;
+            help.style.color = 'var(--text2)';
+        }
+    } catch (e) {
+        console.error('Failed to load providers:', e);
+    }
+}
+
+async function fetchModelsForProvider() {
+    const provider = document.getElementById('user-provider').value;
+    const modelSelect = document.getElementById('user-model');
+    const helpText = document.getElementById('model-help');
+    if (!provider) {
+        modelSelect.innerHTML = '<option value="">Select a provider first</option>';
+        return;
+    }
+    helpText.textContent = 'Loading models...';
+    try {
+        const res = await fetch(`/api/models?provider=${encodeURIComponent(provider)}`);
         const models = await res.json();
-        
         modelSelect.innerHTML = '<option value="">Select model...</option>';
-        models.forEach(m => {
-            const option = document.createElement('option');
-            option.value = m.id;
-            option.textContent = m.id;
-            modelSelect.appendChild(option);
-        });
-        
-        helpText.textContent = `Loaded ${models.length} models`;
+        for (const m of models) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name || m.id;
+            modelSelect.appendChild(opt);
+        }
+        helpText.textContent = `Loaded ${models.length} models from ${provider}.`;
     } catch (err) {
         helpText.textContent = 'Error loading models: ' + err.message;
     }
 }
 
 function toggleAI(type) {
-    const isAI = type === 'ai';
-    document.getElementById('ai-fields').style.display = isAI ? 'block' : 'none';
-    document.getElementById('size-fields').style.display = isAI ? 'block' : 'none';
-    if (isAI) {
-        loadSizesForModal();
-    } else {
-        // Reset size checkboxes when switching to human
-        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-            const cb = document.getElementById(`size-${size}`);
-            if (cb) cb.checked = false;
+    document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
+    if (type === 'ai') {
+        loadProviders();
+        loadTaskTypeAssignments();
+    }
+}
+
+async function loadTaskTypeAssignments() {
+    try {
+        const res = await fetch('/api/sizes');
+        const data = await res.json();
+        currentTaskTypeAssignments = {};
+        const sizes = data.sizes || {};
+        for (const [size, info] of Object.entries(sizes)) {
+            currentTaskTypeAssignments[size] = info;
         }
-        document.getElementById('sizes-assignments-info').innerHTML = '';
+        // Update disabled state
+        for (const cb of document.querySelectorAll('input[name="task_types"]')) {
+            const t = cb.value;
+            const assigned = currentTaskTypeAssignments[t];
+            const userId = document.getElementById('user-id').value;
+            if (assigned && assigned.user_id != userId) {
+                cb.disabled = true;
+                cb.parentElement.style.opacity = '0.5';
+                cb.parentElement.title = `Already assigned to ${assigned.user_name}`;
+            } else {
+                cb.disabled = false;
+                cb.parentElement.style.opacity = '1';
+                cb.parentElement.title = '';
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load task type assignments:', e);
     }
 }
 
@@ -128,98 +211,45 @@ function showCreateUser() {
     document.getElementById('user-form').reset();
     document.getElementById('user-modal').style.display = 'flex';
     toggleAI('human');
+    // Reset checkboxes
+    for (const cb of document.querySelectorAll('input[name="task_types"]')) cb.checked = false;
 }
 
 async function showEditUser(userId) {
     document.getElementById('user-modal-title').textContent = 'Edit User';
     document.getElementById('user-id').value = userId;
-
     const res = await fetch('/api/users');
     const users = await res.json();
     const u = users.find(x => x.id === userId);
     if (!u) return;
-
     document.getElementById('user-name').value = u.name || '';
-    document.getElementById('user-role').value = u.role || '';
     document.getElementById('user-type').value = u.type || 'human';
     toggleAI(u.type || 'human');
-
     if (u.type === 'ai') {
-        // Load models first, then set the selected value
-        await fetchModels();
-        const modelSelect = document.getElementById('user-model');
-        const existingOption = modelSelect.querySelector(`option[value="${u.model || ''}"]`);
-        if (!existingOption && u.model) {
-            const opt = document.createElement('option');
-            opt.value = u.model;
-            opt.textContent = u.model;
-            modelSelect.appendChild(opt);
+        // Wait for providers to load
+        await new Promise(r => setTimeout(r, 200));
+        if (u.provider) {
+            document.getElementById('user-provider').value = u.provider;
         }
-        modelSelect.value = u.model || '';
-
-        // Load user's current sizes and update checkboxes
-        await loadSizesForModal(userId);
-    }
-
-    document.getElementById('user-modal').style.display = 'flex';
-}
-
-async function loadSizesForModal(currentUserId) {
-    try {
-        const res = await fetch('/api/sizes');
-        const data = await res.json();
-        const assignments = data.assignments || {};
-        const infoDiv = document.getElementById('sizes-assignments-info');
-
-        let info = [];
-        for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-            const checkbox = document.getElementById(`size-${size}`);
-            const assignment = assignments[size];
-
-            if (assignment) {
-                if (currentUserId && assignment.user_id === currentUserId) {
-                    // This user owns this size – enable and check it
-                    if (checkbox) {
-                        checkbox.disabled = false;
-                        checkbox.parentElement.style.opacity = '1';
-                        checkbox.checked = true;
-                    }
-                } else if (!currentUserId) {
-                    // Create mode – size is taken by someone else
-                    if (checkbox) {
-                        checkbox.disabled = true;
-                        checkbox.parentElement.style.opacity = '0.5';
-                        checkbox.checked = false;
-                    }
-                    info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
-                } else {
-                    // Edit mode – size is taken by another user
-                    if (checkbox) {
-                        checkbox.disabled = true;
-                        checkbox.parentElement.style.opacity = '0.5';
-                        checkbox.checked = false;
-                    }
-                    info.push(`<span class="badge complexity-${size.toLowerCase()}">${size}</span> → ${assignment.user_name}`);
-                }
-            } else {
-                // Size is free
-                if (checkbox) {
-                    checkbox.disabled = false;
-                    checkbox.parentElement.style.opacity = '1';
-                    // Don't change checked state for edit mode (will be set by caller)
-                    if (!currentUserId) checkbox.checked = false;
-                }
+        if (u.model) {
+            await fetchModelsForProvider();
+            // Ensure model option exists
+            const modelSelect = document.getElementById('user-model');
+            if (!modelSelect.querySelector(`option[value="${u.model}"]`) && u.model) {
+                const opt = document.createElement('option');
+                opt.value = u.model;
+                opt.textContent = u.model;
+                modelSelect.appendChild(opt);
             }
+            modelSelect.value = u.model;
         }
-
-        if (info.length > 0) {
-            infoDiv.innerHTML = '<strong>Foglalt méretek:</strong> ' + info.join(' ');
-        } else {
-            infoDiv.innerHTML = '';
+        // Set task_types
+        for (const cb of document.querySelectorAll('input[name="task_types"]')) {
+            cb.checked = (u.task_types || []).includes(cb.value);
         }
-    } catch (e) {
-        console.error('Failed to load sizes for modal:', e);
+        await loadTaskTypeAssignments();
     }
+    document.getElementById('user-modal').style.display = 'flex';
 }
 
 async function saveUser(e) {
@@ -227,16 +257,20 @@ async function saveUser(e) {
     const userId = document.getElementById('user-id').value;
     const fd = new FormData(e.target);
     fd.delete('user_id');
-
     const url = userId ? `/api/users/${userId}` : '/api/users';
     const method = userId ? 'PATCH' : 'POST';
-
     const res = await fetch(url, { method, body: fd });
     if (res.ok) {
-        // Save default sizes via dedicated endpoint
-        const resData = await res.json();
-        const savedUserId = userId || resData.id;
-        await saveSizesForUser(savedUserId);
+        const data = await res.json();
+        const savedUserId = userId || data.id;
+        // Save task_types via dedicated endpoint
+        const taskTypes = [];
+        for (const cb of document.querySelectorAll('input[name="task_types"]:checked')) taskTypes.push(cb.value);
+        await fetch(`/api/users/${savedUserId}/task-types`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_types: taskTypes})
+        });
         closeModal('user-modal');
         window.location.reload();
     } else {
@@ -244,19 +278,6 @@ async function saveUser(e) {
         alert('Error: ' + (err.detail || JSON.stringify(err)));
     }
     return false;
-}
-
-async function saveSizesForUser(userId) {
-    const sizes = [];
-    for (const size of ['XS', 'S', 'M', 'L', 'XL']) {
-        const cb = document.getElementById(`size-${size}`);
-        if (cb && cb.checked && !cb.disabled) sizes.push(size);
-    }
-    await fetch(`/api/users/${userId}/default-sizes`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({sizes})
-    });
 }
 
 async function deleteUser(userId) {

@@ -1608,22 +1608,16 @@ Return ONLY valid JSON, no other text."""
         async with async_session() as session:
             result = await session.execute(sa_select(User).order_by(User.name))
             users = result.scalars().all()
-            # Get all default sizes in one query
-            sizes_result = await session.execute(sa_select(UserDefaultSize.user_id, UserDefaultSize.size))
-            sizes_map: dict[int, list[str]] = {}
-            for uid, size in sizes_result.all():
-                sizes_map.setdefault(uid, []).append(size)
             return [
                 {
                     "id": u.id,
                     "name": u.name,
-                    "role": u.role,
                     "type": u.type,
                     "provider": u.provider,
                     "model": u.model,
                     "system_prompt": u.system_prompt,
                     "execute_command": u.execute_command,
-                    "default_sizes": sizes_map.get(u.id, []),
+                    "task_types": u.task_types or [],
                 }
                 for u in users
             ]
@@ -1636,52 +1630,61 @@ Return ONLY valid JSON, no other text."""
             sizes = await get_user_default_sizes(session, user_id)
             return {"user_id": user_id, "default_sizes": sizes}
 
-    @app.put("/api/users/{user_id}/default-sizes")
-    async def update_user_sizes(user_id: int, payload: dict):
+    @app.put("/api/users/{user_id}/task-types")
+    async def update_user_task_types(user_id: int, payload: dict):
         """
-        Set default polo sizes for a user.
-        Body: {"sizes": ["XS", "S"]}
-        Each size can only be assigned to one user.
+        Set task types for a user.
+        Body: {"task_types": ["xs", "s", "task_manager"]}
+        Sizes (xs/s/m/l/xl) can only be assigned to one user each.
+        Special roles (task_manager, merger) can have multiple users.
         """
-        sizes = payload.get("sizes", [])
-        if not isinstance(sizes, list):
-            raise HTTPException(400, "sizes must be a list")
-        
+        task_types = payload.get("task_types", [])
+        if not isinstance(task_types, list):
+            raise HTTPException(400, "task_types must be a list")
+
+        valid_sizes = ["xs", "s", "m", "l", "xl"]
+        valid_roles = ["task_manager", "merger"]
+        for t in task_types:
+            if t not in valid_sizes and t not in valid_roles:
+                raise HTTPException(400, f"Invalid task_type: {t}")
+
         async with async_session() as session:
             user = await get_or_404(session, User, user_id)
-            try:
-                await set_user_default_sizes(session, user_id, sizes)
-                await session.commit()
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Error setting default sizes for user {user_id}: {e}")
-                raise HTTPException(500, f"Failed to set default sizes: {str(e)}")
-            
-            return {"user_id": user_id, "default_sizes": sizes}
+            # Check uniqueness for sizes
+            for t in task_types:
+                if t in valid_sizes:
+                    conflict = await session.execute(
+                        sa_select(User).where(
+                            User.task_types.contains([t]),
+                            User.id != user_id,
+                        )
+                    )
+                    other = conflict.scalars().first()
+                    if other:
+                        raise HTTPException(400, f"Size '{t}' is already assigned to user '{other.name}'")
+            user.task_types = task_types
+            await session.commit()
+            return {"user_id": user_id, "task_types": task_types}
 
     @app.get("/api/sizes")
     async def list_sizes():
-        """List all polo sizes and their assigned users."""
+        """List all task types and their assigned users."""
         async with async_session() as session:
-            result = await session.execute(
-                sa_select(UserDefaultSize.size, UserDefaultSize.user_id, User.name)
-                .join(User, User.id == UserDefaultSize.user_id)
-                .order_by(UserDefaultSize.size)
-            )
+            result = await session.execute(sa_select(User))
+            users = result.scalars().all()
             assignments = {}
-            for size, uid, uname in result.all():
-                assignments[size] = {"user_id": uid, "user_name": uname}
-            
+            for u in users:
+                for t in (u.task_types or []):
+                    assignments[t] = {"user_id": u.id, "user_name": u.name}
             return {
-                "valid_sizes": VALID_SIZES,
-                "assignments": assignments,
+                "valid_sizes": ["xs", "s", "m", "l", "xl"],
+                "valid_roles": ["task_manager", "merger"],
+                "sizes": assignments,
             }
 
     @app.post("/api/users")
     async def create_user(
         name: str = Form(...),
-        role: str = Form(""),
         type: str = Form(...),
         provider: str = Form(""),
         api_key: str = Form(""),
@@ -1692,29 +1695,23 @@ Return ONLY valid JSON, no other text."""
         async with async_session() as session:
             user = User(
                 name=name,
-                role=role or None,
                 type=type,
                 provider=provider or None,
                 api_key=api_key or None,
                 model=model or None,
                 system_prompt=system_prompt or None,
                 execute_command=execute_command or None,
+                task_types=[],
             )
             session.add(user)
             await session.commit()
             await session.refresh(user)
-
-            # If AI user with API key, update OpenCode auth
-            if type == "ai" and api_key:
-                _write_opencode_auth(user)
-
             return {"id": user.id, "name": user.name, "type": user.type}
 
     @app.patch("/api/users/{user_id}")
     async def update_user(
         user_id: int,
         name: Optional[str] = Form(None),
-        role: Optional[str] = Form(None),
         type: Optional[str] = Form(None),
         provider: Optional[str] = Form(None),
         api_key: Optional[str] = Form(None),
@@ -1728,8 +1725,8 @@ Return ONLY valid JSON, no other text."""
                 raise HTTPException(404)
             if name:
                 user.name = name
-            if role is not None:
-                user.role = role or None
+            if type is not None:
+                user.type = type
             if api_key is not None:
                 user.api_key = api_key or None
             if provider is not None:
@@ -1741,11 +1738,6 @@ Return ONLY valid JSON, no other text."""
             if execute_command is not None:
                 user.execute_command = execute_command or None
             await session.commit()
-
-            # Update OpenCode auth if this AI user has API key
-            if user.type == "ai" and user.api_key:
-                _write_opencode_auth(user)
-
             return {"ok": True}
 
     @app.delete("/api/users/{user_id}")
