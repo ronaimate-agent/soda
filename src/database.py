@@ -357,7 +357,10 @@ async def init_db():
             ("callback_url", "http://localhost:8000/api/callback"),
             ("opencode_api_key", ""),
             ("openrouter_api_key", ""),
-            ("ai_provider", "opencode"),
+            ("minimax_api_key", ""),
+            ("provider_opencode_enabled", "false"),
+            ("provider_openrouter_enabled", "true"),
+            ("provider_minimax_enabled", "false"),
         ]:
             existing = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == key)

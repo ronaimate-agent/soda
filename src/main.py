@@ -128,6 +128,36 @@ def create_app() -> FastAPI:
             setting = result.scalar_one_or_none()
             return (setting.value or "").strip() if setting else ""
 
+    async def _get_minimax_api_key() -> str:
+        """Get Minimax API key from global settings."""
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(GlobalSetting).where(GlobalSetting.key == "minimax_api_key")
+            )
+            setting = result.scalar_one_or_none()
+            return (setting.value or "").strip() if setting else ""
+
+    async def get_enabled_providers() -> list[dict]:
+        """Return list of providers that are enabled in settings with their config."""
+        providers = []
+        for p in ["opencode", "openrouter", "minimax"]:
+            enabled = (await get_setting(f"provider_{p}_enabled", "false")) == "true"
+            if not enabled:
+                continue
+            if p == "opencode":
+                key = await _get_opencode_api_key()
+            elif p == "openrouter":
+                key = await _get_openrouter_api_key()
+            else:
+                key = await _get_minimax_api_key()
+            providers.append({
+                "id": p,
+                "name": p.capitalize(),
+                "api_key": key,
+                "configured": bool(key),
+            })
+        return providers
+
     async def _get_effective_api_key() -> str:
         """Get the API key for the currently configured provider."""
         provider = await get_setting("ai_provider", "opencode")
@@ -1759,35 +1789,49 @@ Return ONLY valid JSON, no other text."""
 
     # ── API: Models ────────────────────────────────────────────────
 
-    @app.get("/api/models")
-    async def list_models():
-        """List available AI models from configured provider (OpenCode or OpenRouter)"""
+    @app.get("/api/providers")
+    async def list_providers():
+        """List all enabled providers with their config."""
         try:
-            # Get provider setting
-            provider = await get_setting("ai_provider", "opencode")
-            opencode_api_key = await get_setting("opencode_api_key", "")
-            openrouter_api_key = await get_setting("openrouter_api_key", "")
+            providers = await get_enabled_providers()
+            return {"providers": providers}
+        except Exception as e:
+            logger.error(f"Error listing providers: {e}")
+            return {"providers": []}
+
+    @app.get("/api/models")
+    async def list_models(provider: str = Query(None)):
+        """List available AI models for a specific provider.
+        If no provider is given, uses the first enabled one."""
+        try:
+            if not provider:
+                providers = await get_enabled_providers()
+                if not providers:
+                    return []
+                provider = providers[0]["id"]
 
             if provider == "openrouter":
-                return await _fetch_openrouter_models(openrouter_api_key)
+                return await _fetch_openrouter_models(await _get_openrouter_api_key())
+            elif provider == "minimax":
+                return await _fetch_openrouter_models(await _get_minimax_api_key(), base_url="https://api.minimax.chat/v1")
             else:
-                return await _fetch_opencode_models(opencode_api_key)
+                return await _fetch_opencode_models(await _get_opencode_api_key())
         except Exception as e:
             logger.error(f"Error fetching models: {e}")
             return []
 
-    async def _fetch_openrouter_models(api_key: str) -> list[dict]:
-        """Fetch models from OpenRouter API."""
+    async def _fetch_openrouter_models(api_key: str, base_url: str = "https://openrouter.ai/api/v1") -> list[dict]:
+        """Fetch models from OpenAI-compatible API (OpenRouter, Minimax, etc)."""
         if not api_key:
             return []
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(
-                    "https://openrouter.ai/api/v1/models",
+                    f"{base_url}/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
                 if resp.status_code != 200:
-                    logger.error(f"OpenRouter API error: {resp.status_code}")
+                    logger.error(f"OpenAI-compatible API error ({base_url}): {resp.status_code}")
                     return []
                 data = resp.json()
                 models = []
@@ -1795,7 +1839,7 @@ Return ONLY valid JSON, no other text."""
                     models.append({"id": m["id"], "name": m.get("name", m["id"])})
                 return models
         except Exception as e:
-            logger.error(f"OpenRouter fetch error: {e}")
+            logger.error(f"OpenAI-compatible fetch error ({base_url}): {e}")
             return []
 
     async def _fetch_opencode_models(api_key: str) -> list[dict]:

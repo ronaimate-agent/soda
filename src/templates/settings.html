@@ -7,33 +7,46 @@
 <div class="settings-form">
     <form onsubmit="return saveSettings(event)">
 
-        <h3>🤖 AI Provider</h3>
-        <label>Provider</label>
-        <select name="ai_provider" id="ai-provider" onchange="toggleProvider(this.value)" style="margin-bottom:16px">
-            <option value="opencode" {% if settings.get('ai_provider', 'opencode') == 'opencode' %}selected{% endif %}>OpenCode (CLI)</option>
-            <option value="openrouter" {% if settings.get('ai_provider', 'opencode') == 'openrouter' %}selected{% endif %}>OpenRouter (API)</option>
-        </select>
+        <h3>🤖 AI Providers</h3>
+        <p class="help-text">Configure one or more AI providers. Users can be assigned to any enabled provider.</p>
 
-        <div id="opencode-fields">
-            <label>OpenCode API Key</label>
-            <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-... or openrouter key" class="input-mono" autocomplete="off">
-            <p class="help-text">This key is injected as <code>OPENCODE_API_KEY</code> when running execute commands via OpenCode CLI.</p>
+        <div class="provider-card" data-provider="opencode">
+            <div class="provider-header">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_opencode_enabled" value="true" {% if settings.get('provider_opencode_enabled', 'false') == 'true' %}checked{% endif %}>
+                    <strong>OpenCode (CLI)</strong>
+                </label>
+            </div>
+            <label style="margin-top:8px">API Key</label>
+            <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-..." class="input-mono" autocomplete="off">
+            <p class="help-text">Injected as <code>OPENCODE_API_KEY</code> when running OpenCode CLI.</p>
         </div>
 
-        <div id="openrouter-fields" style="display:none">
-            <label>OpenRouter API Key</label>
+        <div class="provider-card" data-provider="openrouter" style="margin-top:12px">
+            <div class="provider-header">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_openrouter_enabled" value="true" {% if settings.get('provider_openrouter_enabled', 'true') == 'true' %}checked{% endif %}>
+                    <strong>OpenRouter</strong>
+                </label>
+            </div>
+            <label style="margin-top:8px">API Key</label>
             <input type="password" name="openrouter_api_key" value="{{ settings.get('openrouter_api_key', '') }}" placeholder="sk-or-v1-..." class="input-mono" autocomplete="off">
-            <p class="help-text">Used to fetch model list and run AI agents via OpenRouter API.</p>
             <p class="help-text">Get your key at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
         </div>
 
-        <h3>📡 Callback</h3>
-        <label>Callback URL</label>
-        <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
-        <p class="help-text">This URL is called by the execute command to report task status. Available in execute command templates as <code>&#123;&#123;callback.url&#125;&#125;</code>.</p>
+        <div class="provider-card" data-provider="minimax" style="margin-top:12px">
+            <div class="provider-header">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_minimax_enabled" value="true" {% if settings.get('provider_minimax_enabled', 'false') == 'true' %}checked{% endif %}>
+                    <strong>Minimax</strong>
+                </label>
+            </div>
+            <label style="margin-top:8px">API Key</label>
+            <input type="password" name="minimax_api_key" value="{{ settings.get('minimax_api_key', '') }}" placeholder="..." class="input-mono" autocomplete="off">
+        </div>
 
-        <h3>🔧 Git Integration</h3>
-        <p class="help-text">Configure GitHub credentials to enable "Commit & Push" for tasks in the Done column.</p>
+        <h3 style="margin-top:24px">🔧 Git Integration</h3>
+        <p class="help-text">Required for project repo creation, commit/push, and PR workflows.</p>
 
         <label>GitHub Username</label>
         <input type="text" name="git_username" value="{{ settings.get('git_username', '') }}" placeholder="your-github-username" class="input-mono">
@@ -53,28 +66,54 @@
         <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
         <p class="help-text">Default branch name for new repositories.</p>
 
+        <h3 style="margin-top:24px">📡 Callback</h3>
+        <label>Callback URL</label>
+        <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
+        <p class="help-text">Available in execute command templates as <code>&#123;&#123;callback.url&#125;&#125;</code>.</p>
+
         <button type="submit" class="btn btn-primary" style="margin-top:24px">Save Settings</button>
         <span id="save-indicator" style="display:none; margin-left:12px; color:var(--green)">✓ Saved</span>
     </form>
 </div>
 
-<script>
-function toggleProvider(val) {
-    document.getElementById('opencode-fields').style.display = val === 'opencode' ? 'block' : 'none';
-    document.getElementById('openrouter-fields').style.display = val === 'openrouter' ? 'block' : 'none';
+<style>
+.provider-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 8px;
 }
-toggleProvider(document.getElementById('ai-provider').value);
+.provider-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.provider-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    margin: 0 !important;
+}
+</style>
 
+<script>
 async function saveSettings(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
+    // Normalize checkboxes: always send value, even if unchecked
+    for (const cb of e.target.querySelectorAll('input[type="checkbox"]')) {
+        if (!cb.checked) fd.set(cb.name, 'false');
+    }
     const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
     if (res.ok) {
         const ind = document.getElementById('save-indicator');
         ind.style.display = 'inline';
         setTimeout(() => ind.style.display = 'none', 2000);
     } else {
-        alert('Failed to save settings');
+        const err = await res.json();
+        alert('Failed to save settings: ' + (err.detail || JSON.stringify(err)));
     }
     return false;
 }
