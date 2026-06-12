@@ -251,6 +251,30 @@ def create_app() -> FastAPI:
             json.dump(auth_data, f)
         logger.info(f"Task {task.id}: auth.json written — provider={user_provider}, model={assignee.model}, key_prefix={user_api_key[:8]}...")
 
+        # Also update opencode.jsonc to set the correct model
+        # OpenCode CLI reads model from opencode.jsonc which can override auth.json
+        OPENCODE_CONFIG = Path("/root/.config/opencode/opencode.jsonc")
+        try:
+            config_data = {}
+            if OPENCODE_CONFIG.exists():
+                import json as _json
+                with open(OPENCODE_CONFIG, "r") as _f:
+                    config_data = _json.load(_f)
+            # Update model to match the assignee's provider/model
+            if assignee.model:
+                config_data["model"] = assignee.model
+            else:
+                # fallback: remove model so auth.json takes effect
+                config_data.pop("model", None)
+            # Ensure schema is present
+            if "$schema" not in config_data:
+                config_data["$schema"] = "https://opencode.ai/config.json"
+            with open(OPENCODE_CONFIG, "w") as _f:
+                _json.dump(config_data, _f, indent=2)
+            logger.info(f"Task {task.id}: opencode.jsonc updated — model={assignee.model}")
+        except Exception as config_err:
+            logger.warning(f"Task {task.id}: failed to update opencode.jsonc: {config_err}")
+
         # Get project + settings for prompt generation
         async with async_session() as session:
             setting_res = await session.execute(
