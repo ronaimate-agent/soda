@@ -28,13 +28,14 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[Optional[str]] = mapped_column(String(255))
     type: Mapped[str] = mapped_column(String(10), nullable=False)  # 'human' or 'ai'
     provider: Mapped[Optional[str]] = mapped_column(String(100))
     api_key: Mapped[Optional[str]] = mapped_column(Text)
     model: Mapped[Optional[str]] = mapped_column(String(255))
     system_prompt: Mapped[Optional[str]] = mapped_column(Text)
     execute_command: Mapped[Optional[str]] = mapped_column(Text)
+    # Task types this user can handle: 'xs','s','m','l','xl','task_manager','merger'
+    task_types: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String(20)), default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -52,7 +53,7 @@ class Project(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     repo_name: Mapped[Optional[str]] = mapped_column(String(255))
     repo_url: Mapped[Optional[str]] = mapped_column(String(500))
-    review_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
+    merger_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -93,6 +94,7 @@ class Task(Base):
     assignee_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
     complexity: Mapped[Optional[str]] = mapped_column(String(3))
     position: Mapped[int] = mapped_column(Integer, default=0)
+    is_bug: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -296,6 +298,58 @@ async def init_db():
             """)
         except Exception:
             pass
+
+        # Add users.task_types column if missing
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'users' AND column_name = 'task_types'
+            """)
+            if result.first() is None:
+                await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN task_types VARCHAR(255)[] DEFAULT '{}'")
+        except Exception:
+            pass
+
+        # Add projects.merger_user_id if missing (replace review_user_id if old)
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'projects' AND column_name = 'merger_user_id'
+            """)
+            if result.first() is None:
+                # Rename review_user_id -> merger_user_id if it exists
+                result2 = await conn.exec_driver_sql("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'projects' AND column_name = 'review_user_id'
+                """)
+                if result2.first() is not None:
+                    await conn.exec_driver_sql("ALTER TABLE projects RENAME COLUMN review_user_id TO merger_user_id")
+                else:
+                    await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN merger_user_id INTEGER REFERENCES users(id)")
+        except Exception:
+            pass
+
+        # Add tasks.is_bug if missing
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'tasks' AND column_name = 'is_bug'
+            """)
+            if result.first() is None:
+                await conn.exec_driver_sql("ALTER TABLE tasks ADD COLUMN is_bug BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass
+
+        # Drop users.role column if it exists (clean migration)
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'users' AND column_name = 'role'
+            """)
+            if result.first() is not None:
+                await conn.exec_driver_sql("ALTER TABLE users DROP COLUMN role")
+        except Exception:
+            pass
     
     # Initialize default settings
     async with async_session() as session:
@@ -340,26 +394,24 @@ async def init_db():
             seed_users = [
                 User(
                     name="Project Owner",
-                    role="Project Owner",
                     type="human",
+                    task_types=[],
                 ),
                 User(
                     name="Task Master",
-                    role="Task Master",
                     type="ai",
                     model=_default_model,
+                    task_types=["task_manager"],
                     system_prompt=(
                         "You are the Task Master. Your job is to analyze project ideas and break them down into well-defined, actionable tasks.\n\n"
                         "When given a project idea, you must:\n"
                         "1. Analyze the idea thoroughly\n"
                         "2. Create a list of specific, actionable tasks\n"
-                        "3. For each task, provide: title, description, complexity (low/medium/high), and assignee role (junior/medior/senior)\n"
-                        "4. Define task dependencies (which tasks must be completed before others)\n"
-                        "5. Output everything as a structured JSON response\n\n"
+                        "3. For each task, provide: title, description, complexity (XS/S/M/L/XL)\n"
+                        "4. Output everything as a structured JSON response\n\n"
                         "Always think about:\n"
                         "- What needs to be built first (foundation/infrastructure)\n"
-                        "- What can be parallelized\n"
-                        "- What depends on what\n"
+                        "- A logical sequential order\n"
                         "- Appropriate complexity for each task\n\n"
                         'Output format:\n'
                         '{\n'
@@ -369,9 +421,7 @@ async def init_db():
                         '    {\n'
                         '      "title": "...",\n'
                         '      "description": "...",\n'
-                        '      "complexity": "low|medium|high",\n'
-                        '      "assignee_role": "junior|medior|senior",\n'
-                        '      "depends_on": [task_index, ...]\n'
+                        '      "complexity": "XS|S|M|L|XL"\n'
                         '    }\n'
                         '  ]\n'
                         '}'
@@ -380,70 +430,46 @@ async def init_db():
                 ),
                 User(
                     name="Junior Developer",
-                    role="Junior Developer",
                     type="ai",
                     model=_default_model,
+                    task_types=["xs", "s"],
                     system_prompt=(
-                        "You are a Junior Developer. You handle straightforward, well-defined tasks with clear requirements.\n\n"
-                        "Your characteristics:\n"
-                        "- You follow instructions precisely\n"
-                        "- You ask questions when requirements are unclear\n"
-                        "- You write clean, simple code\n"
-                        "- You focus on one thing at a time\n"
-                        "- You ask for help when stuck\n\n"
+                        "You are a Junior Developer. You handle small, well-defined tasks with clear requirements.\n\n"
                         "Rules:\n"
                         "- ONLY work on the specific task assigned to you\n"
                         "- Do NOT work on other tasks in the project\n"
-                        "- If you need clarification, ask via the callback URL with status=blocked\n"
-                        "- When finished, report via the callback URL with status=review\n"
-                        "- Keep your changes focused and minimal"
+                        "- Create/modify files in the working directory\n"
+                        "- When finished, report back via the callback URL with status=review"
                     ),
                     execute_command=_junior_exec,
                 ),
                 User(
                     name="Medior Developer",
-                    role="Medior Developer",
                     type="ai",
                     model=_default_model,
+                    task_types=["m", "l"],
                     system_prompt=(
-                        "You are a Medior Developer. You handle moderately complex tasks that require some architectural thinking and experience.\n\n"
-                        "Your characteristics:\n"
-                        "- You understand common patterns and best practices\n"
-                        "- You can work independently on well-scoped tasks\n"
-                        "- You write maintainable, tested code\n"
-                        "- You consider edge cases\n"
-                        "- You can debug and troubleshoot issues\n\n"
+                        "You are a Medior Developer. You handle moderately complex tasks.\n\n"
                         "Rules:\n"
                         "- ONLY work on the specific task assigned to you\n"
                         "- Do NOT work on other tasks in the project\n"
-                        "- If you need clarification, ask via the callback URL with status=blocked\n"
-                        "- When finished, report via the callback URL with status=review\n"
-                        "- Write tests for your code when appropriate\n"
-                        "- Keep changes focused on the assigned task"
+                        "- Create/modify files in the working directory\n"
+                        "- When finished, report back via the callback URL with status=review"
                     ),
                     execute_command=_medior_exec,
                 ),
                 User(
                     name="Senior Developer",
-                    role="Senior Developer",
                     type="ai",
                     model=_default_model,
+                    task_types=["xl"],
                     system_prompt=(
-                        "You are a Senior Developer. You handle complex tasks that require deep architectural knowledge, system design, and experience.\n\n"
-                        "Your characteristics:\n"
-                        "- You think about the big picture while implementing details\n"
-                        "- You design scalable, maintainable solutions\n"
-                        "- You consider performance, security, and edge cases\n"
-                        "- You write comprehensive tests\n"
-                        "- You can refactor and improve existing code\n"
-                        "- You mentor through code quality\n\n"
+                        "You are a Senior Developer. You handle complex, large tasks that require deep architectural knowledge.\n\n"
                         "Rules:\n"
                         "- ONLY work on the specific task assigned to you\n"
                         "- Do NOT work on other tasks in the project\n"
-                        "- If you need clarification, ask via the callback URL with status=blocked\n"
-                        "- When finished, report via the callback URL with status=review\n"
-                        "- Ensure your changes integrate well with the existing codebase\n"
-                        "- Write tests and documentation as needed"
+                        "- Create/modify files in the working directory\n"
+                        "- When finished, report back via the callback URL with status=review"
                     ),
                     execute_command=_senior_exec,
                 ),
