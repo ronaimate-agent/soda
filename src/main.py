@@ -162,11 +162,13 @@ def create_app() -> FastAPI:
             })
         return providers
 
-    async def _get_effective_api_key() -> str:
-        """Get the API key for the currently configured provider."""
-        provider = await get_setting("ai_provider", "opencode")
+    async def _get_effective_api_key(user_provider: str = None) -> str:
+        """Get the API key for the given provider (or global ai_provider setting)."""
+        provider = user_provider or await get_setting("ai_provider", "opencode")
         if provider == "openrouter":
             return await _get_openrouter_api_key()
+        if provider == "minimax":
+            return await _get_minimax_api_key()
         return await _get_opencode_api_key()
 
     # ── Helper: run execute command ─────────────────────────────────
@@ -221,24 +223,30 @@ def create_app() -> FastAPI:
                 depends_on_ids = [row[0] for row in deps_result.all()]
 
         # Write AI user's auth to OpenCode config
+        # Priority: user's own api_key > global api_key for the provider
         _write_opencode_auth(assignee)
 
-        # Get effective API key based on provider setting
-        api_key = await _get_effective_api_key()
-
-        # ── Ensure auth.json has correct provider + key ──
-        provider_setting = await get_setting("ai_provider", "opencode")
-        if api_key and not assignee.api_key:
-            auth_dir = OPENCODE_AUTH.parent
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            auth_data = {}
-            if assignee.model:
-                auth_data["model"] = assignee.model
-            if provider_setting != "opencode":
-                auth_data["provider"] = provider_setting
-            auth_data["apiKey"] = api_key
-            with open(OPENCODE_AUTH, "w") as f:
-                json.dump(auth_data, f)
+        # If user has no api_key, fall back to global key for their provider
+        if not assignee.api_key:
+            provider_setting = await get_setting("ai_provider", "opencode")
+            global_key = await _get_effective_api_key()
+            if global_key:
+                auth_dir = OPENCODE_AUTH.parent
+                auth_dir.mkdir(parents=True, exist_ok=True)
+                auth_data = {"apiKey": global_key}
+                if assignee.model:
+                    auth_data["model"] = assignee.model
+                # Use user's provider if set, else fall back to global setting
+                user_provider = assignee.provider or provider_setting
+                if user_provider and user_provider != "opencode":
+                    auth_data["provider"] = user_provider
+                with open(OPENCODE_AUTH, "w") as f:
+                    json.dump(auth_data, f)
+                logger.info(f"Task {task.id}: using global API key for provider={user_provider}")
+            else:
+                logger.warning(f"Task {task.id}: no API key for assignee {assignee.name} and no global fallback")
+        else:
+            logger.info(f"Task {task.id}: using assignee's own API key")
 
         # Get project + settings for prompt generation
         async with async_session() as session:
@@ -355,11 +363,13 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-        # Build env
+        # Build env — use the effective API key for subprocess environment
+        # (same logic as above: user's own key > global fallback)
         env = os.environ.copy()
-        if api_key:
-            env["OPENCODE_API_KEY"] = api_key
-            env["OPENROUTER_API_KEY"] = api_key
+        effective_key = assignee.api_key or await _get_effective_api_key()
+        if effective_key:
+            env["OPENCODE_API_KEY"] = effective_key
+            env["OPENROUTER_API_KEY"] = effective_key
 
         # Resolve template variables in the OPERATION command (not user's command)
         cmd = operation_cmd
