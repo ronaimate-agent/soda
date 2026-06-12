@@ -1163,7 +1163,7 @@ def create_app() -> FastAPI:
             "status": i.status,
             "questions": questions,
             "created_at": str(i.created_at),
-            "project_id": i.project_id,
+            "project_id": None,  # filled by caller via Project.source_idea_id
             "project_name": None,
         }
 
@@ -1174,17 +1174,24 @@ def create_app() -> FastAPI:
                 sa_select(Idea).order_by(Idea.created_at.desc())
             )
             ideas = result.scalars().all()
+            # Build a map: idea_id -> Project (one project per idea via source_idea_id)
+            idea_ids = [i.id for i in ideas]
+            proj_map: dict[int, "Project"] = {}
+            if idea_ids:
+                proj_result = await session.execute(
+                    sa_select(Project).where(Project.source_idea_id.in_(idea_ids))
+                )
+                for p in proj_result.scalars().all():
+                    if p.source_idea_id is not None:
+                        proj_map[p.source_idea_id] = p
+
             out = []
             for i in ideas:
                 d = _idea_to_dict(i)
-                if i.status == "generated":
-                    proj_result = await session.execute(
-                        sa_select(Project).where(Project.source_idea_id == i.id)
-                    )
-                    proj = proj_result.scalars().first()
-                    if proj:
-                        d["project_id"] = proj.id
-                        d["project_name"] = proj.name
+                proj = proj_map.get(i.id)
+                if proj:
+                    d["project_id"] = proj.id
+                    d["project_name"] = proj.name
                 out.append(d)
             return out
 
@@ -1569,6 +1576,12 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 
 Return ONLY valid JSON, no other text."""
 
+        # Find the project linked to this idea (via Project.source_idea_id)
+        proj_result = await session.execute(
+            sa_select(Project).where(Project.source_idea_id == idea_id)
+        )
+        project_for_idea = proj_result.scalar_one_or_none()
+
         # Start background task for architect call + project creation
         asyncio.create_task(_generate_project_background(
             idea_id=idea_id,
@@ -1579,7 +1592,11 @@ Return ONLY valid JSON, no other text."""
         ))
 
         # Return current project_id (may be None for new ideas) so frontend can poll
-        return {"status": "generating", "idea_id": idea_id, "project_id": idea.project_id}
+        return {
+            "status": "generating",
+            "idea_id": idea_id,
+            "project_id": project_for_idea.id if project_for_idea else None,
+        }
 
     async def _generate_project_background(
         idea_id: int,
@@ -1709,6 +1726,12 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 
 Return ONLY valid JSON, no other text."""
 
+        # Find the project linked to this idea (via Project.source_idea_id)
+        proj_result2 = await session.execute(
+            sa_select(Project).where(Project.source_idea_id == idea_id)
+        )
+        project_for_idea2 = proj_result2.scalar_one_or_none()
+
         # Start background task
         asyncio.create_task(_generate_project_background(
             idea_id=idea_id,
@@ -1719,7 +1742,11 @@ Return ONLY valid JSON, no other text."""
         ))
 
         # Return current project_id (may be None for new ideas) so frontend can poll
-        return {"status": "generating", "idea_id": idea_id, "project_id": idea.project_id}
+        return {
+            "status": "generating",
+            "idea_id": idea_id,
+            "project_id": project_for_idea2.id if project_for_idea2 else None,
+        }
 
     # ── API: Users ─────────────────────────────────────────────────
 
