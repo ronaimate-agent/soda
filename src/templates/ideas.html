@@ -9,7 +9,7 @@
 
 <div class="idea-grid">
     {% for idea in ideas %}
-    <div class="idea-card" data-idea-id="{{ idea.id }}">
+    <div class="idea-card" data-idea-id="{{ idea.id }}" onclick="navigateToProject({{ idea.id }}, '{{ idea.status }}', '{{ idea.project_id or '' }}')" style="cursor:{% if idea.status == 'generated' %}pointer{% else %}default{% endif %}">
         <div class="idea-card-header">
             <h3>{{ idea.title }}</h3>
             <span class="badge status-{{ idea.status }}">{{ idea.status }}</span>
@@ -22,7 +22,7 @@
         {% endif %}
 
         {% if idea.questions %}
-        <div class="idea-questions">
+        <div class="idea-questions" onclick="event.stopPropagation()">
             <p class="questions-label">❓ Architect has questions:</p>
             {% for q in idea.questions %}
             <div class="question-item">
@@ -34,13 +34,19 @@
         </div>
         {% endif %}
 
-        <div class="idea-actions">
+        <div class="idea-actions" onclick="event.stopPropagation()">
             {% if idea.status == 'active' %}
                 <button class="btn btn-sm btn-primary" onclick="showArchitectSelect({{ idea.id }})">🚀 Generate Project</button>
             {% elif idea.status == 'generating' %}
                 <span class="badge">⏳ Generating...</span>
             {% elif idea.status == 'generated' %}
+                {% if idea.project_id %}
+                <a class="btn btn-sm btn-primary" href="/project/{{ idea.project_id }}">📂 Open Project</a>
+                {% else %}
                 <span class="badge status-generated">✅ Project created</span>
+                {% endif %}
+            {% elif idea.status == 'error' %}
+                <span class="badge" style="background:#ef4444">❌ Error</span>
             {% endif %}
             <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteIdea({{ idea.id }})">Delete</button>
@@ -88,8 +94,8 @@
 <div id="generate-overlay" style="display:none; position:fixed; top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,0.7); z-index:2000; align-items:center; justify-content:center; flex-direction:column; gap:16px;">
     <div style="background:var(--bg2); padding:32px; border-radius:var(--radius); text-align:center; max-width:400px;">
         <div style="font-size:2em; margin-bottom:12px;">🤖</div>
-        <p id="generate-status-text">Architect is thinking...</p>
-        <p class="help-text" style="margin-top:8px">This may take a minute</p>
+        <p id="generate-status-text">Architect is analyzing your idea...</p>
+        <p class="help-text" style="margin-top:8px" id="generate-status-detail">This may take a minute</p>
     </div>
 </div>
 
@@ -98,28 +104,28 @@
     <div class="modal-content">
         <span class="modal-close" onclick="closeModal('architect-select-modal')">&times;</span>
         <h2>Generate Project</h2>
-        <p class="help-text" style="margin-bottom:16px">Configure the architect AI and GitHub repository for this project.</p>
+        <p class="help-text" style="margin-bottom:16px">Architect AI will break your idea into sequential tasks.</p>
         <input type="hidden" id="architect-select-idea-id">
-        
+
         <label>Architect AI</label>
         <select id="architect-select-user">
-            <option value="">Select an AI user...</option>
+            <option value="">Select an AI user with task_manager role...</option>
             {% for u in ai_users %}
-            <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
+            <option value="{{ u.id }}" data-has-tm="{% if 'task_manager' in (u.task_types or []) %}1{% else %}0{% endif %}">
+                {{ u.name }}{% if u.model %} ({{ u.model }}){% endif %}{% if 'task_manager' in (u.task_types or []) %} ⭐{% endif %}
+            </option>
             {% endfor %}
         </select>
-        {% if not ai_users %}
-        <p class="help-text" style="margin-top:8px">⚠️ No AI users yet. <a href="/users">Create an AI user</a> first.</p>
-        {% endif %}
-        
+        <p class="help-text" id="architect-help"></p>
+
         <hr style="margin:16px 0; border-color:var(--border);">
-        
+
         <h3 style="margin-bottom:12px;">📦 GitHub Repository</h3>
-        
+
         <label>Repository Name</label>
         <input type="text" id="repo-name" placeholder="my-project-name" style="margin-bottom:8px;">
-        <p class="help-text">Leave empty to auto-generate from project name. Only lowercase letters, numbers, and hyphens.</p>
-        
+        <p class="help-text">Leave empty to auto-generate. Only lowercase letters, numbers, and hyphens.</p>
+
         <label>Visibility</label>
         <div style="display:flex; gap:16px; margin:8px 0 16px;">
             <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
@@ -131,28 +137,27 @@
                 <span>🌐 Public</span>
             </label>
         </div>
-        
+
         <button class="btn btn-primary" onclick="generateProject()" style="margin-top:8px;">Generate Project</button>
     </div>
 </div>
 
 <script>
+function navigateToProject(ideaId, status, projectId) {
+    if (status === 'generated' && projectId) {
+        window.location = `/project/${projectId}`;
+    }
+}
+
 async function createIdea() {
     const title = document.getElementById('idea-title').value.trim();
     if (!title) { alert('Title is required'); return; }
-
     const fd = new FormData();
     fd.append('title', title);
     fd.append('description', document.getElementById('idea-desc').value);
-
     const res = await fetch('/api/ideas', { method: 'POST', body: fd });
-    if (res.ok) {
-        closeModal('create-idea-modal');
-        window.location.reload();
-    } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || JSON.stringify(err)));
-    }
+    if (res.ok) { closeModal('create-idea-modal'); window.location.reload(); }
+    else { const err = await res.json(); alert('Error: ' + (err.detail || JSON.stringify(err))); }
 }
 
 function showCreateIdea() {
@@ -173,13 +178,9 @@ async function updateIdea() {
     const fd = new FormData();
     fd.append('title', document.getElementById('edit-idea-title').value);
     fd.append('description', document.getElementById('edit-idea-desc').value);
-
     const res = await fetch(`/api/ideas/${id}`, { method: 'PATCH', body: fd });
     if (res.ok) { closeModal('edit-idea-modal'); window.location.reload(); }
-    else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || JSON.stringify(err)));
-    }
+    else { const err = await res.json(); alert('Error: ' + (err.detail || JSON.stringify(err))); }
 }
 
 async function deleteIdea(ideaId) {
@@ -190,8 +191,20 @@ async function deleteIdea(ideaId) {
 
 function showArchitectSelect(ideaId) {
     document.getElementById('architect-select-idea-id').value = ideaId;
-    document.getElementById('architect-select-user').value = '';
+    const sel = document.getElementById('architect-select-user');
+    // Auto-select a user with task_manager role
+    let autoSelected = false;
+    for (const opt of sel.options) {
+        if (opt.dataset.hasTm === '1') {
+            sel.value = opt.value;
+            autoSelected = true;
+            break;
+        }
+    }
     document.getElementById('architect-select-modal').style.display = 'flex';
+    if (!autoSelected) {
+        document.getElementById('architect-help').innerHTML = '⚠️ No Task Manager user. <a href="/users">Create one</a> with the "task_manager" task type.';
+    }
 }
 
 async function generateProject() {
@@ -199,26 +212,25 @@ async function generateProject() {
     const architectUserId = document.getElementById('architect-select-user').value;
     const repoName = document.getElementById('repo-name').value.trim();
     const repoPrivate = document.querySelector('input[name="repo-visibility"]:checked').value === 'private';
-    
+
     if (!architectUserId) {
         alert('Please select an Architect AI user.');
         return;
     }
-    
     closeModal('architect-select-modal');
-    
+
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
     document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
+    document.getElementById('generate-status-detail').textContent = 'This may take up to 2 minutes';
 
     try {
         const fd = new FormData();
         fd.append('architect_user_id', architectUserId);
         fd.append('repo_name', repoName);
         fd.append('repo_private', repoPrivate ? 'true' : 'false');
-        
+
         const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST', body: fd });
-        
         let data;
         const contentType = res.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
@@ -230,19 +242,14 @@ async function generateProject() {
             }
             throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
-        
+
         if (data.status === 'generating') {
-            // Background task started – poll for result
             const result = await pollIdeaStatus(ideaId);
-            overlay.style.display = 'none';
-            
             if (result === 'generated') {
-                // Reload to get fresh data, then redirect
-                window.location.reload();
+                window.location = `/project/${data.project_id || ''}`;
             } else if (result === 'questions') {
                 window.location.reload();
             } else if (result === 'error') {
-                // Fetch error details
                 const ideaRes = await fetch(`/api/ideas`);
                 const ideas = await ideaRes.json();
                 const idea = ideas.find(i => i.id === parseInt(ideaId));
@@ -253,17 +260,14 @@ async function generateProject() {
                         if (q.error) errorMsg = 'Error: ' + q.error;
                     } catch(e) {}
                 }
+                overlay.style.display = 'none';
                 alert(errorMsg);
             } else {
+                overlay.style.display = 'none';
                 alert('Generation timed out. Please try again.');
             }
         } else if (data.status === 'generated') {
             overlay.style.display = 'none';
-            let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
-            if (data.repo_url) {
-                msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
-            }
-            alert(msg);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
             overlay.style.display = 'none';
@@ -282,70 +286,51 @@ async function generateProject() {
 }
 
 async function pollIdeaStatus(ideaId, maxAttempts = 60) {
-    const overlay = document.getElementById('generate-overlay');
     const statusText = document.getElementById('generate-status-text');
-    
+    const detailText = document.getElementById('generate-status-detail');
     for (let i = 0; i < maxAttempts; i++) {
-        await new Promise(r => setTimeout(r, 3000)); // Poll every 3 seconds
-        
+        await new Promise(r => setTimeout(r, 3000));
         try {
             const res = await fetch(`/api/ideas`);
             const ideas = await res.json();
             const idea = ideas.find(i => i.id === parseInt(ideaId));
-            
             if (!idea) return 'error';
-            
             if (idea.status === 'generated') {
-                statusText.textContent = 'Project created! Redirecting...';
+                statusText.textContent = 'Project created! Opening...';
                 return 'generated';
             } else if (idea.status === 'active' && idea.questions && idea.questions.length > 0) {
-                // Check if it's an error
                 try {
                     const q = JSON.parse(idea.questions);
-                    if (q.error) {
-                        statusText.textContent = 'Error occurred';
-                        return 'error';
-                    }
+                    if (q.error) return 'error';
                 } catch(e) {}
-                statusText.textContent = 'Architect has questions for you...';
                 return 'questions';
             } else if (idea.status === 'error') {
-                statusText.textContent = 'Error occurred';
                 return 'error';
             }
-            
-            // Still generating
             const elapsed = (i + 1) * 3;
-            statusText.textContent = `Architect is working... (${elapsed}s elapsed)`;
+            statusText.textContent = 'Architect is working...';
+            detailText.textContent = `${elapsed}s elapsed`;
         } catch (e) {
             console.error('Poll error:', e);
         }
     }
-    
-    statusText.textContent = 'Timed out waiting for architect';
     return 'timeout';
 }
 
 async function submitAnswers(ideaId) {
     const card = document.querySelector(`[data-idea-id="${ideaId}"]`);
     const answers = [...card.querySelectorAll('.question-answer')].map(ta => ta.value.trim());
-
-    if (answers.some(a => !a)) {
-        alert('Please answer all questions before continuing.');
-        return;
-    }
-
+    if (answers.some(a => !a)) { alert('Please answer all questions before continuing.'); return; }
     const fd = new FormData();
     fd.append('answers', JSON.stringify(answers));
 
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
     document.getElementById('generate-status-text').textContent = 'Processing your answers...';
+    document.getElementById('generate-status-detail').textContent = 'Generating project';
 
     try {
         const res = await fetch(`/api/ideas/${ideaId}/answer`, { method: 'POST', body: fd });
-        
-        // Try to parse JSON, handle non-JSON (HTML) error responses
         let data;
         const contentType = res.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
@@ -357,12 +342,10 @@ async function submitAnswers(ideaId) {
             }
             throw new Error(`Server error (${res.status}): ${text.substring(0, 300)}`);
         }
-        
+
         if (data.status === 'generating') {
-            // Background task started – poll for result
             const result = await pollIdeaStatus(ideaId);
             overlay.style.display = 'none';
-            
             if (result === 'generated') {
                 window.location.reload();
             } else if (result === 'questions') {
@@ -384,12 +367,7 @@ async function submitAnswers(ideaId) {
             }
         } else if (data.status === 'generated') {
             overlay.style.display = 'none';
-            let msg = `✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`;
-            if (data.repo_url) {
-                msg += `\n\n📦 GitHub repo: ${data.repo_url}`;
-            }
-            alert(msg);
-            window.location = `/project/${data.project_id}`;
+            window.location.reload();
         } else if (data.status === 'questions') {
             overlay.style.display = 'none';
             window.location.reload();

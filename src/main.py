@@ -1062,6 +1062,8 @@ def create_app() -> FastAPI:
             "status": i.status,
             "questions": questions,
             "created_at": str(i.created_at),
+            "project_id": None,
+            "project_name": None,
         }
 
     @app.get("/api/ideas")
@@ -1070,7 +1072,20 @@ def create_app() -> FastAPI:
             result = await session.execute(
                 sa_select(Idea).order_by(Idea.created_at.desc())
             )
-            return [_idea_to_dict(i) for i in result.scalars().all()]
+            ideas = result.scalars().all()
+            out = []
+            for i in ideas:
+                d = _idea_to_dict(i)
+                if i.status == "generated":
+                    proj_result = await session.execute(
+                        sa_select(Project).where(Project.source_idea_id == i.id)
+                    )
+                    proj = proj_result.scalars().first()
+                    if proj:
+                        d["project_id"] = proj.id
+                        d["project_name"] = proj.name
+                out.append(d)
+            return out
 
     @app.post("/api/ideas")
     async def create_idea(
@@ -1292,6 +1307,7 @@ def create_app() -> FastAPI:
                 description=result.get("project_description", idea.description),
                 repo_name=repo_name,
                 repo_url=repo_url,
+                source_idea_id=idea.id,
             )
             session.add(project)
             await session.commit()

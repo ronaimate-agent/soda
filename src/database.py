@@ -54,6 +54,7 @@ class Project(Base):
     repo_name: Mapped[Optional[str]] = mapped_column(String(255))
     repo_url: Mapped[Optional[str]] = mapped_column(String(500))
     merger_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
+    source_idea_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ideas.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -348,6 +349,17 @@ async def init_db():
             """)
             if result.first() is not None:
                 await conn.exec_driver_sql("ALTER TABLE users DROP COLUMN role")
+        except Exception:
+            pass
+
+        # Add projects.source_idea_id if missing
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'projects' AND column_name = 'source_idea_id'
+            """)
+            if result.first() is None:
+                await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN source_idea_id INTEGER REFERENCES ideas(id)")
         except Exception:
             pass
     
