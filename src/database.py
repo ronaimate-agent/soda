@@ -514,3 +514,24 @@ async def init_db():
             for u in seed_users:
                 session.add(u)
             await session.commit()
+
+    # Backfill execute_command for existing AI users that don't have one
+    async with async_session() as session:
+        result = await session.execute(
+            sa_select(User).where(
+                User.type == "ai",
+                (User.execute_command.is_(None)) | (User.execute_command == ""),
+            )
+        )
+        ai_users_without_cmd = result.scalars().all()
+        if ai_users_without_cmd:
+            _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
+            default_cmd = (
+                "opencode run '{{task.prompt}}' && "
+                "curl -s -X POST '" + _callback_tpl + "&status=review' "
+                "|| true"
+            )
+            for u in ai_users_without_cmd:
+                u.execute_command = default_cmd
+                print(f"Backfilled execute_command for AI user: {u.name} (id={u.id})")
+            await session.commit()

@@ -1944,6 +1944,16 @@ Return ONLY valid JSON, no other text."""
         execute_command: str = Form(""),
     ):
         async with async_session() as session:
+            # Auto-populate execute_command for AI users if not provided
+            final_execute_command = execute_command or None
+            if type == "ai" and not final_execute_command:
+                _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
+                final_execute_command = (
+                    "opencode run '{{task.prompt}}' && "
+                    "curl -s -X POST '" + _callback_tpl + "&status=review' "
+                    "|| true"
+                )
+
             user = User(
                 name=name,
                 type=type,
@@ -1951,7 +1961,7 @@ Return ONLY valid JSON, no other text."""
                 api_key=api_key or None,
                 model=model or None,
                 system_prompt=system_prompt or None,
-                execute_command=execute_command or None,
+                execute_command=final_execute_command,
                 task_types=[],
             )
             session.add(user)
@@ -1988,6 +1998,15 @@ Return ONLY valid JSON, no other text."""
                 user.system_prompt = system_prompt or None
             if execute_command is not None:
                 user.execute_command = execute_command or None
+            # If user is AI but has no execute_command, auto-populate with default
+            if user.type == "ai" and not user.execute_command:
+                _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
+                user.execute_command = (
+                    "opencode run '{{task.prompt}}' && "
+                    "curl -s -X POST '" + _callback_tpl + "&status=review' "
+                    "|| true"
+                )
+                logger.info(f"User {user_id} ({user.name}): auto-populated default execute_command")
             await session.commit()
             return {"ok": True}
 
