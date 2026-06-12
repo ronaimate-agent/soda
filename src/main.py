@@ -229,8 +229,40 @@ def create_app() -> FastAPI:
                 ).order_by(Task.id)
             )
             remaining_tasks = remaining_result.scalars().all()
+            remaining_task_ids = [t.id for t in remaining_tasks]
+
+            # Fetch dependencies among remaining tasks
+            remaining_deps = {}  # task_id -> [depends_on_id]
+            if remaining_task_ids:
+                dep_result = await session.execute(
+                    sa_select(TaskDependency.task_id, TaskDependency.depends_on_id)
+                    .where(TaskDependency.task_id.in_(remaining_task_ids))
+                )
+                for tid, dep_id in dep_result.all():
+                    remaining_deps.setdefault(tid, []).append(dep_id)
+
+            # Title lookup for deps
+            task_titles = {t.id: t.title for t in remaining_tasks}
+
+            def _task_status_icon(t: Task) -> str:
+                return {
+                    "backlog": "📋",
+                    "running": "▶️",
+                    "blocked": "❓",
+                    "review": "👁️",
+                    "done": "✅",
+                }.get(t.board_column, "•")
+
+            def _deps_str(t: Task) -> str:
+                deps = remaining_deps.get(t.id, [])
+                if not deps:
+                    return ""
+                # Resolve dep titles
+                dep_titles = [task_titles.get(d, f"#{d}") for d in deps]
+                return f" *(depends on: {', '.join(dep_titles)})*"
+
             remaining_summary = "\n".join(
-                f"- [{t.board_column}] {t.title}: {t.description or '(no description)'}"
+                f"- {_task_status_icon(t)} [{t.board_column}] **{t.title}**: {t.description or '(no description)'}{_deps_str(t)}"
                 for t in remaining_tasks
             )
 
@@ -271,7 +303,7 @@ def create_app() -> FastAPI:
 **Description:** {task.description or '(no description)'}
 **Complexity:** {task.complexity or 'not specified'}
 
-## Other tasks in this project (DO NOT work on these):
+## Other tasks in this project (DO NOT work on these — they are separate tasks):
 {remaining_summary if remaining_summary else '(none)'}
 
 ## Existing comments on this task:
@@ -280,6 +312,8 @@ def create_app() -> FastAPI:
 ## Work Instructions:
 - ONLY implement what is described in "Your Task" above
 - Do NOT work on any of the other tasks listed above
+- If a task in the list above depends on yours (i.e. your task must complete first), still focus on your own work — do not start the dependent task
+- If a task above is already done (✅), review what was implemented to keep your work consistent
 - Work ONLY in the current directory: {workdir}
 - Create/edit files directly in this directory
 - Do NOT call any callback URL — the system handles that automatically
