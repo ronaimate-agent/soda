@@ -38,6 +38,9 @@ running_processes: dict[int, Tuple[asyncio.subprocess.Process, Any, Any]] = {}
 # Idempotency guard: track tasks currently being post-processed
 _processing_tasks: set[int] = set()
 
+# Track active idea generation tasks
+generation_tasks: set[int] = set()
+
 # Context for post-processing after AI completes
 _post_process_ctx: dict[int, dict] = {}
 
@@ -1505,6 +1508,7 @@ Return ONLY valid JSON, no other text."""
         repo_private: bool = True,
     ):
         """Background task: call architect, create project, handle errors."""
+        generation_tasks.add(idea_id)
         try:
             result = await _call_architect(architect, prompt)
         except Exception as e:
@@ -2427,20 +2431,41 @@ Return ONLY valid JSON, no other text."""
     _watchdog_logger = logging.getLogger("watchdog")
     
     async def _watchdog_check():
-        """Periodically check running tasks for stuck processes."""
+        """Periodically check running tasks for stuck processes.
+        Also cleans up stale ideas and running tasks."""
         while True:
             await asyncio.sleep(30)  # Check every 30 seconds
             try:
+                # Clean up stale ideas: stuck in 'generating' for too long
+                async with async_session() as session:
+                    from datetime import datetime, timezone, timedelta
+                    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                    stale_ideas = await session.execute(
+                        sa_select(Idea).where(
+                            Idea.status == "generating",
+                        )
+                    )
+                    for idea in stale_ideas.scalars().all():
+                        # Check if there's actually a background task running
+                        is_running = idea.id in generation_tasks
+                        if not is_running:
+                            logger.warning(f"Stale idea {idea.id} in 'generating' with no background task — marking as error")
+                            idea.status = "error"
+                            idea.pending_questions = json.dumps({
+                                "error": "Generation task disappeared (server restart or crash). Try again."
+                            })
+                    await session.commit()
+
                 async with async_session() as session:
                     # Find all tasks in running column
                     result = await session.execute(
                         sa_select(Task).where(Task.board_column == "running")
                     )
                     running_tasks = result.scalars().all()
-                    
+
                     for task in running_tasks:
                         proc_info = running_processes.get(task.id)
-                        
+
                         # Case 1: Task is running but no process tracked → stuck
                         if not proc_info:
                             _watchdog_logger.warning(f"Task {task.id} has no running process, moving to blocked")
