@@ -233,9 +233,16 @@ def create_app() -> FastAPI:
         else:
             logger.info(f"Task {task.id}: using assignee's own API key")
 
+        # Write auth.json in OpenCode CLI expected format
+        # Format: {"credentials": [{"provider": "<provider>", "key": "<api_key>"}]}
+        # Also write model/provider at top-level for opencode run to pick up
         auth_dir = OPENCODE_AUTH.parent
         auth_dir.mkdir(parents=True, exist_ok=True)
-        auth_data = {"apiKey": user_api_key}
+        auth_data = {
+            "credentials": [
+                {"provider": user_provider or "opencode", "key": user_api_key}
+            ]
+        }
         if assignee.model:
             auth_data["model"] = assignee.model
         if user_provider and user_provider != "opencode":
