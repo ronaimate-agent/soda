@@ -170,12 +170,34 @@ def create_app() -> FastAPI:
 
     # ── Helper: run execute command ─────────────────────────────────
 
-    async def _run_execute_command(task: Task, assignee: User) -> None:
+    async def _run_execute_command(
+        task: Task,
+        assignee: User,
+        comments: Optional[list] = None,
+        depends_on_ids: Optional[list] = None,
+    ) -> None:
         """Run the AI user's execute command as a subprocess.
         Clones the project repo, checks out main, provides context,
         then after AI completes: git commit/push, create PR, send callback."""
         if not assignee.execute_command:
             return
+
+        # Use provided comments/depends_on_ids, or fetch fresh
+        if comments is None:
+            async with async_session() as session:
+                comments_result = await session.execute(
+                    sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
+                )
+                comments = [
+                    {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                    for c in comments_result.scalars().all()
+                ]
+        if depends_on_ids is None:
+            async with async_session() as session:
+                deps_result = await session.execute(
+                    sa_select(TaskDependency.depends_on_id).where(TaskDependency.task_id == task.id)
+                )
+                depends_on_ids = [row[0] for row in deps_result.all()]
 
         # Write AI user's auth to OpenCode config
         _write_opencode_auth(assignee)
@@ -199,14 +221,6 @@ def create_app() -> FastAPI:
 
         # Build comments JSON and collect context
         async with async_session() as session:
-            result = await session.execute(
-                sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
-            )
-            comments = [
-                {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
-                for c in result.scalars().all()
-            ]
-
             setting_res = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
             )
@@ -354,8 +368,20 @@ def create_app() -> FastAPI:
                     content=f"📋 **Prompt sent to AI:**{model_info}\n\n```\n{full_prompt}\n```",
                 ))
                 await prompt_session.commit()
-        except Exception:
-            pass
+                logger.info(f"Task {task.id}: prompt comment saved to DB")
+        except Exception as e:
+            logger.error(f"Task {task.id}: failed to save prompt comment: {e}")
+            # Save a short error comment so user can see something went wrong
+            try:
+                async with async_session() as err_session:
+                    err_session.add(TaskComment(
+                        task_id=task.id,
+                        author="Soda",
+                        content=f"⚠️ Failed to save full prompt to DB: {e}",
+                    ))
+                    await err_session.commit()
+            except Exception:
+                pass
 
         # Build env
         env = os.environ.copy()
@@ -1056,7 +1082,22 @@ def create_app() -> FastAPI:
                 if task.assignee_id:
                     assignee = await session.get(User, task.assignee_id)
                     if assignee and assignee.type == "ai":
-                        await _run_execute_command(task, assignee)
+                        # Fetch comments BEFORE starting AI
+                        comments_result = await session.execute(
+                            sa_select(TaskComment).where(TaskComment.task_id == task.id).order_by(TaskComment.created_at)
+                        )
+                        comments = [
+                            {"author": c.author, "content": c.content, "created_at": str(c.created_at)}
+                            for c in comments_result.scalars().all()
+                        ]
+                        # Fetch dependencies for prompt context
+                        deps_result = await session.execute(
+                            sa_select(TaskDependency.depends_on_id).where(TaskDependency.task_id == task.id)
+                        )
+                        depends_on_ids = [row[0] for row in deps_result.all()]
+                        await _run_execute_command(
+                            task, assignee, comments=comments, depends_on_ids=depends_on_ids
+                        )
 
             # If moving from blocked to running, kill old process if any
             if old_column == "blocked" and new_column == "running":
@@ -2474,20 +2515,22 @@ Return ONLY valid JSON, no other text."""
     async def _watchdog_check():
         """Periodically check running tasks for stuck processes.
         Also cleans up stale ideas and running tasks."""
+        # Grace period: tasks started less than this many seconds ago are not checked
+        GRACE_PERIOD_SEC = 90
         while True:
             await asyncio.sleep(30)  # Check every 30 seconds
             try:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+
                 # Clean up stale ideas: stuck in 'generating' for too long
                 async with async_session() as session:
-                    from datetime import datetime, timezone, timedelta
-                    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
                     stale_ideas = await session.execute(
                         sa_select(Idea).where(
                             Idea.status == "generating",
                         )
                     )
                     for idea in stale_ideas.scalars().all():
-                        # Check if there's actually a background task running
                         is_running = idea.id in generation_tasks
                         if not is_running:
                             logger.warning(f"Stale idea {idea.id} in 'generating' with no background task — marking as error")
@@ -2498,7 +2541,6 @@ Return ONLY valid JSON, no other text."""
                     await session.commit()
 
                 async with async_session() as session:
-                    # Find all tasks in running column
                     result = await session.execute(
                         sa_select(Task).where(Task.board_column == "running")
                     )
@@ -2507,16 +2549,42 @@ Return ONLY valid JSON, no other text."""
                     for task in running_tasks:
                         proc_info = running_processes.get(task.id)
 
+                        # Grace period: skip tasks just moved to running
+                        if task.updated_at and (now - task.updated_at).total_seconds() < GRACE_PERIOD_SEC:
+                            continue
+
                         # Case 1: Task is running but no process tracked → stuck
                         if not proc_info:
+                            # Try to read stderr for diagnostic info
+                            workdir = Path(f"/tmp/soda-task-workdirs/task-{task.id}")
+                            stderr_content = ""
+                            stdout_content = ""
+                            try:
+                                err_log = workdir / ".soda-stderr.log"
+                                out_log = workdir / ".soda-stdout.log"
+                                if err_log.exists():
+                                    stderr_content = err_log.read_text()[-2000:]  # last 2KB
+                                if out_log.exists():
+                                    stdout_content = out_log.read_text()[-2000:]
+                            except Exception:
+                                pass
+
+                            diag = ""
+                            if stderr_content:
+                                diag = f"\n\n**Stderr (last 2KB):**\n```\n{stderr_content}\n```"
+                            if stdout_content:
+                                diag += f"\n\n**Stdout (last 2KB):**\n```\n{stdout_content}\n```"
+
                             _watchdog_logger.warning(f"Task {task.id} has no running process, moving to blocked")
                             task.board_column = "blocked"
-                            comment = TaskComment(
+                            session.add(TaskComment(
                                 task_id=task.id,
                                 author="Soda",
-                                content="⚠️ Watchdog: No running process found for this task. It may have crashed or failed to start. Task moved to blocked."
-                            )
-                            session.add(comment)
+                                content=(
+                                    f"⚠️ Watchdog: No running process found after {GRACE_PERIOD_SEC}s. "
+                                    f"It may have crashed or failed to start. Task moved to blocked.{diag}"
+                                ),
+                            ))
                             continue
                         
                         # Case 2: Process has exited but task still running → stuck
